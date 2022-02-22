@@ -30,6 +30,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
 	egressfirewall "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	egressqosv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
 
 	utilnet "k8s.io/utils/net"
 
@@ -134,6 +135,9 @@ type Controller struct {
 
 	// egressFirewalls is a map of namespaces and the egressFirewall attached to it
 	egressFirewalls sync.Map
+
+	// egressQoses is a map of namespaces and the egressQos attached to it
+	egressQoses sync.Map
 
 	// An address set factory that creates address sets
 	addressSetFactory addressset.AddressSetFactory
@@ -383,6 +387,7 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 
 	}
 
+	oc.WatchEgressQoS()
 	klog.Infof("Completing all the Watchers took %v", time.Since(start))
 
 	if config.Kubernetes.OVNEmptyLbEvents {
@@ -1246,6 +1251,37 @@ func (oc *Controller) WatchNodes() {
 		},
 	}, oc.syncNodes)
 	klog.Infof("Bootstrapping existing nodes and cleaning stale nodes took %v", time.Since(start))
+}
+
+// WatchEgressQoS starts the watching of EgressQoS resources and calls
+// back the appropriate handler logic
+func (oc *Controller) WatchEgressQoS() *factory.Handler {
+	return oc.watchFactory.AddEgressQoSHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			egressQos := obj.(*egressqosv1.EgressQoS).DeepCopy()
+			err := oc.addEgressQoS(egressQos)
+			if err != nil {
+				klog.Error("ORI add:", err)
+			}
+			klog.Info("Added EgressQoS!")
+		},
+		UpdateFunc: func(old, newer interface{}) {
+			oldEq := old.(*egressqosv1.EgressQoS).DeepCopy()
+			newEq := newer.(*egressqosv1.EgressQoS).DeepCopy()
+			if err := oc.updateEgressQoS(oldEq, newEq); err != nil {
+				klog.Errorf("ORI update:", err)
+			}
+			klog.Info("Updated EgressQoS!")
+		},
+		DeleteFunc: func(obj interface{}) {
+			egressQos := obj.(*egressqosv1.EgressQoS).DeepCopy()
+			err := oc.deleteEgressQoS(egressQos)
+			if err != nil {
+				klog.Error("ORI delete:", err)
+			}
+			klog.Info("Deleted EgressQoS!")
+		},
+	}, nil) // WIP implement sync?
 }
 
 // GetNetworkPolicyACLLogging retrieves ACL deny policy logging setting for the Namespace
