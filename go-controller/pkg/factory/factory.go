@@ -22,6 +22,10 @@ import (
 	ocpcloudnetworkinformerfactory "github.com/openshift/client-go/cloudnetwork/informers/externalversions"
 	ocpcloudnetworklister "github.com/openshift/client-go/cloudnetwork/listers/cloudnetwork/v1"
 
+	egressqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
+	egressqosscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned/scheme"
+	egressqosinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions"
+
 	kapi "k8s.io/api/core/v1"
 	knet "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,11 +47,12 @@ type WatchFactory struct {
 	// requirements with atomic accesses
 	handlerCounter uint64
 
-	iFactory     informerfactory.SharedInformerFactory
-	eipFactory   egressipinformerfactory.SharedInformerFactory
-	efFactory    egressfirewallinformerfactory.SharedInformerFactory
-	cpipcFactory ocpcloudnetworkinformerfactory.SharedInformerFactory
-	informers    map[reflect.Type]*informer
+	iFactory         informerfactory.SharedInformerFactory
+	eipFactory       egressipinformerfactory.SharedInformerFactory
+	efFactory        egressfirewallinformerfactory.SharedInformerFactory
+	cpipcFactory     ocpcloudnetworkinformerfactory.SharedInformerFactory
+	egressQosFactory egressqosinformerfactory.SharedInformerFactory
+	informers        map[reflect.Type]*informer
 
 	stopChan chan struct{}
 }
@@ -80,6 +85,7 @@ var (
 	egressFirewallType       reflect.Type = reflect.TypeOf(&egressfirewallapi.EgressFirewall{})
 	egressIPType             reflect.Type = reflect.TypeOf(&egressipapi.EgressIP{})
 	cloudPrivateIPConfigType reflect.Type = reflect.TypeOf(&ocpcloudnetworkapi.CloudPrivateIPConfig{})
+	egressQosType            reflect.Type = reflect.TypeOf(&egressqosapi.EgressQoS{})
 )
 
 // NewMasterWatchFactory initializes a new watch factory for the master or master+node processes.
@@ -91,18 +97,22 @@ func NewMasterWatchFactory(ovnClientset *util.OVNClientset) (*WatchFactory, erro
 	// the downside of making it tight (like 10 minutes) is needless spinning on all resources
 	// However, AddEventHandlerWithResyncPeriod can specify a per handler resync period
 	wf := &WatchFactory{
-		iFactory:     informerfactory.NewSharedInformerFactory(ovnClientset.KubeClient, resyncInterval),
-		eipFactory:   egressipinformerfactory.NewSharedInformerFactory(ovnClientset.EgressIPClient, resyncInterval),
-		efFactory:    egressfirewallinformerfactory.NewSharedInformerFactory(ovnClientset.EgressFirewallClient, resyncInterval),
-		cpipcFactory: ocpcloudnetworkinformerfactory.NewSharedInformerFactory(ovnClientset.CloudNetworkClient, resyncInterval),
-		informers:    make(map[reflect.Type]*informer),
-		stopChan:     make(chan struct{}),
+		iFactory:         informerfactory.NewSharedInformerFactory(ovnClientset.KubeClient, resyncInterval),
+		eipFactory:       egressipinformerfactory.NewSharedInformerFactory(ovnClientset.EgressIPClient, resyncInterval),
+		efFactory:        egressfirewallinformerfactory.NewSharedInformerFactory(ovnClientset.EgressFirewallClient, resyncInterval),
+		cpipcFactory:     ocpcloudnetworkinformerfactory.NewSharedInformerFactory(ovnClientset.CloudNetworkClient, resyncInterval),
+		egressQosFactory: egressqosinformerfactory.NewSharedInformerFactory(ovnClientset.EgressQoSClient, resyncInterval),
+		informers:        make(map[reflect.Type]*informer),
+		stopChan:         make(chan struct{}),
 	}
 
 	if err := egressipapi.AddToScheme(egressipscheme.Scheme); err != nil {
 		return nil, err
 	}
 	if err := egressfirewallapi.AddToScheme(egressfirewallscheme.Scheme); err != nil {
+		return nil, err
+	}
+	if err := egressqosscheme.AddToScheme(egressqosscheme.Scheme); err != nil {
 		return nil, err
 	}
 
@@ -175,6 +185,13 @@ func NewMasterWatchFactory(ovnClientset *util.OVNClientset) (*WatchFactory, erro
 			return nil, err
 		}
 	}
+
+	// WIP: Remove later, shouldn't be enabled by default?
+	wf.informers[egressQosType], err = newInformer(egressQosType, wf.egressQosFactory.K8s().V1().EgressQoSes().Informer())
+	if err != nil {
+		return nil, err
+	}
+
 	return wf, nil
 }
 
@@ -210,6 +227,11 @@ func (wf *WatchFactory) Start() error {
 			}
 		}
 	}
+	// WIP as well
+	if wf.egressQosFactory != nil {
+		wf.egressQosFactory.Start(wf.stopChan)
+	}
+
 	return nil
 }
 
@@ -440,6 +462,16 @@ func (wf *WatchFactory) AddEgressFirewallHandler(handlerFuncs cache.ResourceEven
 // RemoveEgressFirewallHandler removes an EgressFirewall object event handler function
 func (wf *WatchFactory) RemoveEgressFirewallHandler(handler *Handler) {
 	wf.removeHandler(egressFirewallType, handler)
+}
+
+// AddEgressFirewallHandler adds a handler function that will be executed on EgressFirewall object changes
+func (wf *WatchFactory) AddEgressQoSHandler(handlerFuncs cache.ResourceEventHandler, processExisting func([]interface{})) *Handler {
+	return wf.addHandler(egressQosType, "", nil, handlerFuncs, processExisting)
+}
+
+// RemoveEgressFirewallHandler removes an EgressFirewall object event handler function
+func (wf *WatchFactory) RemoveEgressQoSHandler(handler *Handler) {
+	wf.removeHandler(egressQosType, handler)
 }
 
 // AddEgressIPHandler adds a handler function that will be executed on EgressIP object changes
