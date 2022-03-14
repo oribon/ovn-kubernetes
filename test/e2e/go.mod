@@ -3,6 +3,7 @@ module github.com/ovn-org/ovn-kubernetes/test/e2e
 go 1.16
 
 replace (
+	github.com/ovn-org/ovn-kubernetes/go-controller => ../../go-controller // TODO: Remove local ref
 	k8s.io/api => k8s.io/api v0.22.2
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.22.2
 	k8s.io/apimachinery => k8s.io/apimachinery v0.22.2
@@ -34,15 +35,16 @@ replace (
 
 require (
 	github.com/google/go-cmp v0.5.5
-	github.com/onsi/ginkgo v1.14.0
-	github.com/onsi/gomega v1.10.1
+	github.com/onsi/ginkgo v1.16.4
+	github.com/onsi/gomega v1.14.0
+	github.com/ovn-org/ovn-kubernetes/go-controller v0.0.0-00010101000000-000000000000
 	github.com/pkg/errors v0.9.1
-	k8s.io/api v0.22.2
-	k8s.io/apimachinery v0.22.2
-	k8s.io/client-go v0.22.2
+	k8s.io/api v0.23.3
+	k8s.io/apimachinery v0.23.3
+	k8s.io/client-go v0.23.3
 	k8s.io/klog v1.0.0
 	k8s.io/kubectl v0.22.2 // indirect
 	k8s.io/kubelet v0.22.2 // indirect
 	k8s.io/kubernetes v1.22.2
-	k8s.io/utils v0.0.0-20210930125809-cb0fa318a74b
+	k8s.io/utils v0.0.0-20211116205334-6203023598ed
 )
