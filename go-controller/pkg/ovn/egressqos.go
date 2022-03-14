@@ -10,19 +10,19 @@ import (
 	egressqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/pkg/errors"
-	corev1 "k8s.io/api/core/v1"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
 )
 
 type egressQos struct {
 	sync.Mutex
-	name            string
-	namespace       string
-	rules           []*egressQosRule
-	logicalSwitches sets.String
+	name      string
+	namespace string
+	rules     []*egressQosRule
 }
 
 type egressQosRule struct {
@@ -38,10 +38,9 @@ const (
 // cloneEgressQoS shallow copies the egressqosapi.EgressQoS object provided.
 func cloneEgressQoS(raw *egressqosapi.EgressQoS) *egressQos {
 	eq := &egressQos{
-		name:            raw.Name,
-		namespace:       raw.Namespace,
-		rules:           make([]*egressQosRule, 0),
-		logicalSwitches: sets.NewString(),
+		name:      raw.Name,
+		namespace: raw.Namespace,
+		rules:     make([]*egressQosRule, 0),
 	}
 	return eq
 }
@@ -93,29 +92,19 @@ func (oc *Controller) addEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 		return fmt.Errorf("cannot Ensure that addressSet for namespace %s exists %v", eq.namespace, err)
 	}
 	ipv4HashedAS, ipv6HashedAS := as.GetASHashNames()
-	// egressqos created -> map[namespace]nodes , update map, send all nodes to createEgressQoS
-	// egressqos modified -> delete current, create again.
-	// deleted -> delete relavant qos and detach from logical switches
-	existingPods, err := oc.watchFactory.GetPods(eq.namespace)
-	if err != nil {
-		return fmt.Errorf("failed to get all the pods (%v)", err)
-	}
-	nodes := nodesFromPods(existingPods)
-	err = oc.createEgressQoS(eq, ipv4HashedAS, ipv6HashedAS, nodes)
+
+	err = oc.createEgressQoS(eq, ipv4HashedAS, ipv6HashedAS)
 	if err != nil {
 		return err
 	}
-	eq.logicalSwitches = nodes
 
 	return nil
 }
 
-func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, hashedAddressSetNameIPv6 string, swNames sets.String) error {
-	nbdbsw := []*nbdb.LogicalSwitch{}
-	for s := range swNames {
-		nbdbsw = append(nbdbsw, &nbdb.LogicalSwitch{
-			Name: s,
-		})
+func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, hashedAddressSetNameIPv6 string) error {
+	logicalSwitches, err := oc.egressQoSSwitches()
+	if err != nil {
+		return err
 	}
 
 	for _, r := range eq.rules {
@@ -131,7 +120,7 @@ func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, h
 		opModels = append(opModels, libovsdbops.OperationModel{
 			Model: &qos,
 			ModelPredicate: func(q *nbdb.QoS) bool {
-				return strings.Contains(q.Match, match)
+				return strings.Contains(q.Match, qos.Match) && q.Priority == qos.Priority
 			},
 			OnModelUpdates: []interface{}{
 				&qos.Priority,
@@ -140,14 +129,14 @@ func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, h
 			},
 			DoAfter: func() {
 				if qos.UUID != "" {
-					for _, sw := range nbdbsw {
+					for _, sw := range logicalSwitches {
 						sw.QOSRules = []string{qos.UUID}
 					}
 				}
 			},
 		})
 
-		for _, sw := range nbdbsw {
+		for _, sw := range logicalSwitches {
 			lsn := sw.Name
 			opModels = append(opModels, libovsdbops.OperationModel{
 				Name:           sw.Name,
@@ -160,8 +149,9 @@ func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, h
 			})
 		}
 
+		// TODO: do it in one transaction instead loop?
 		if _, err := oc.modelClient.CreateOrUpdate(opModels...); err != nil {
-			return fmt.Errorf("tell me why: %s", err)
+			return fmt.Errorf("failed to create qos, err: %s", err)
 		}
 	}
 
@@ -202,11 +192,9 @@ func (oc *Controller) deleteEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 	}
 	ipv4HashedAS, ipv6HashedAS := as.GetASHashNames()
 
-	nbdbsw := []*nbdb.LogicalSwitch{}
-	for s := range eq.logicalSwitches {
-		nbdbsw = append(nbdbsw, &nbdb.LogicalSwitch{
-			Name: s,
-		})
+	logicalSwitches, err := oc.egressQoSSwitches()
+	if err != nil {
+		return err
 	}
 	for _, r := range eq.rules {
 		opModels := []libovsdbops.OperationModel{}
@@ -215,18 +203,18 @@ func (oc *Controller) deleteEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 		opModels = append(opModels, libovsdbops.OperationModel{
 			Model: &qos,
 			ModelPredicate: func(q *nbdb.QoS) bool {
-				return strings.Contains(q.Match, match)
+				return strings.Contains(q.Match, match) && q.Priority == r.priority
 			},
 			DoAfter: func() {
 				if qos.UUID != "" {
-					for _, sw := range nbdbsw {
+					for _, sw := range logicalSwitches {
 						sw.QOSRules = []string{qos.UUID}
 					}
 				}
 			},
 		})
 
-		for _, sw := range nbdbsw {
+		for _, sw := range logicalSwitches {
 			lsn := sw.Name
 			opModels = append(opModels, libovsdbops.OperationModel{
 				Name:           sw.Name,
@@ -239,31 +227,123 @@ func (oc *Controller) deleteEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 			})
 		}
 
+		// TODO: do it in one transaction instead loop?
 		if err := oc.modelClient.Delete(opModels...); err != nil {
-			return fmt.Errorf("delete tell me why: %s", err)
+			return fmt.Errorf("failed to delete qos, err: %s", err)
 		}
 	}
 
 	return nil
 }
 
-func generateEgressQoSMatch(eq *egressQosRule, hashedAddressSetNameIPv4, hashedAddressSetNameIPv6 string) string {
-	var match string
-	switch {
-	case config.IPv4Mode:
-		//match = fmt.Sprintf(`ip4.src == $%s && ip4.dst == %s`, hashedAddressSetNameIPv4, eq.destination)
-		match = fmt.Sprintf(`ip4.src == $%s && ip4.dst == %s`, hashedAddressSetNameIPv4, eq.destination)
-	case config.IPv6Mode:
-		match = fmt.Sprintf(`ip6.src == $%s && ip6.dst == %s`, hashedAddressSetNameIPv6, eq.destination)
-	}
+// This takes care of syncing stale data which we might have in OVN if
+// there's no ovnkube-master running for a while.
+// It will delete QoSes from EgressQoSes which have been deleted while ovnkube-master was down.
+func (oc *Controller) syncEgressQoSes(eqs []interface{}) {
+	oc.syncWithRetry("syncEgressQoses", func() error {
+		nsWithEgressQoS := sets.NewString()
+		for _, eq := range eqs {
+			egressQos, ok := eq.(*egressqosapi.EgressQoS)
+			if !ok {
+				continue
+			}
+			nsWithEgressQoS.Insert(egressQos.Namespace)
+		}
 
-	return match
+		return oc.deleteStaleEgressQoS(nsWithEgressQoS)
+	})
 }
 
-func nodesFromPods(pods []*corev1.Pod) sets.String {
-	nodes := sets.NewString()
-	for _, p := range pods {
-		nodes.Insert(p.Spec.NodeName)
+func (oc *Controller) deleteStaleEgressQoS(nsWithEgressQoS sets.String) error {
+	qosRes := []nbdb.QoS{}
+	logicalSwitches, err := oc.egressQoSSwitches()
+	if err != nil {
+		return err
 	}
-	return nodes
+
+	opModels := []libovsdbops.OperationModel{
+		{
+			ModelPredicate: func(q *nbdb.QoS) bool {
+				eqNs, ok := q.ExternalIDs["EgressQoS"]
+				if !ok { // the QoS is not managed by an EgressQoS
+					return false
+				}
+				if nsWithEgressQoS.Has(eqNs) { // it'll be reconciled later, not stale
+					return false
+				}
+
+				klog.Infof("deleteStaleEgressQoS will delete qos from stale ns: %s", eqNs)
+				return true
+			},
+			ExistingResult: &qosRes,
+			DoAfter: func() {
+				uuids := libovsdbops.ExtractUUIDsFromModels(&qosRes)
+				for _, sw := range logicalSwitches {
+					sw.QOSRules = uuids
+				}
+			},
+			BulkOp: true,
+		},
+	}
+
+	for _, sw := range logicalSwitches {
+		lsn := sw.Name
+		opModels = append(opModels, libovsdbops.OperationModel{
+			Name:           sw.Name,
+			Model:          sw,
+			ModelPredicate: func(ls *nbdb.LogicalSwitch) bool { return ls.Name == lsn },
+			OnModelMutations: []interface{}{
+				&sw.QOSRules,
+			},
+		})
+	}
+
+	if err := oc.modelClient.Delete(opModels...); err != nil {
+		return fmt.Errorf("unable to remove stale qoses, err: %v", err)
+	}
+
+	return nil
+}
+
+func generateEgressQoSMatch(eq *egressQosRule, hashedAddressSetNameIPv4, hashedAddressSetNameIPv6 string) string {
+	var src string
+	var dst string
+
+	switch {
+	case config.IPv4Mode && config.IPv6Mode:
+		src = fmt.Sprintf("(ip4.src == $%s || ip6.src == $%s)", hashedAddressSetNameIPv4, hashedAddressSetNameIPv6)
+	case config.IPv4Mode:
+		src = fmt.Sprintf("ip4.src == $%s", hashedAddressSetNameIPv4)
+	case config.IPv6Mode:
+		src = fmt.Sprintf("ip6.src == $%s", hashedAddressSetNameIPv6)
+	}
+
+	dst = fmt.Sprintf("ip4.dst == %s", eq.destination)
+	if utilnet.IsIPv6CIDRString(eq.destination) {
+		dst = fmt.Sprintf("ip6.dst == %s", eq.destination)
+	}
+
+	return fmt.Sprintf("(%s) && %s", dst, src)
+}
+
+func (oc *Controller) egressQoSSwitches() ([]*nbdb.LogicalSwitch, error) {
+	logicalSwitches := []*nbdb.LogicalSwitch{}
+	if config.Gateway.Mode == config.GatewayModeLocal {
+		nodeLocalSwitches, err := libovsdbops.FindAllNodeLocalSwitches(oc.nbClient)
+		if err != nil {
+			return nil, fmt.Errorf("unable to fetch local switches for EgressQoS, err: %v", err)
+		}
+		for _, nodeLocalSwitch := range nodeLocalSwitches {
+			s := nodeLocalSwitch
+			logicalSwitches = append(logicalSwitches, &s)
+		}
+		return logicalSwitches, nil
+	}
+
+	joinSw := &nbdb.LogicalSwitch{
+		Name: types.OVNJoinSwitch,
+	}
+	logicalSwitches = append(logicalSwitches, joinSw)
+
+	return logicalSwitches, nil
 }

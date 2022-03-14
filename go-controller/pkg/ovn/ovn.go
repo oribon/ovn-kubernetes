@@ -387,6 +387,7 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 
 	}
 
+	// TODO: conditional
 	oc.WatchEgressQoS()
 	klog.Infof("Completing all the Watchers took %v", time.Since(start))
 
@@ -1261,27 +1262,27 @@ func (oc *Controller) WatchEgressQoS() *factory.Handler {
 			egressQos := obj.(*egressqosv1.EgressQoS).DeepCopy()
 			err := oc.addEgressQoS(egressQos)
 			if err != nil {
-				klog.Error("ORI add:", err)
+				klog.Error(err)
 			}
-			klog.Info("Added EgressQoS!")
+			klog.Info("Added EgressQoS!") // TODO: remove
 		},
 		UpdateFunc: func(old, newer interface{}) {
 			oldEq := old.(*egressqosv1.EgressQoS).DeepCopy()
 			newEq := newer.(*egressqosv1.EgressQoS).DeepCopy()
 			if err := oc.updateEgressQoS(oldEq, newEq); err != nil {
-				klog.Errorf("ORI update:", err)
+				klog.Error(err)
 			}
-			klog.Info("Updated EgressQoS!")
+			klog.Info("Updated EgressQoS!") // TODO: remove
 		},
 		DeleteFunc: func(obj interface{}) {
 			egressQos := obj.(*egressqosv1.EgressQoS).DeepCopy()
 			err := oc.deleteEgressQoS(egressQos)
 			if err != nil {
-				klog.Error("ORI delete:", err)
+				klog.Error(err)
 			}
-			klog.Info("Deleted EgressQoS!")
+			klog.Info("Deleted EgressQoS!") // TODO: remove
 		},
-	}, nil) // WIP implement sync?
+	}, oc.syncEgressQoSes)
 }
 
 // GetNetworkPolicyACLLogging retrieves ACL deny policy logging setting for the Namespace

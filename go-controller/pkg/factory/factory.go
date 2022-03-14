@@ -112,7 +112,7 @@ func NewMasterWatchFactory(ovnClientset *util.OVNClientset) (*WatchFactory, erro
 	if err := egressfirewallapi.AddToScheme(egressfirewallscheme.Scheme); err != nil {
 		return nil, err
 	}
-	if err := egressqosscheme.AddToScheme(egressqosscheme.Scheme); err != nil {
+	if err := egressqosapi.AddToScheme(egressqosscheme.Scheme); err != nil {
 		return nil, err
 	}
 
@@ -186,7 +186,7 @@ func NewMasterWatchFactory(ovnClientset *util.OVNClientset) (*WatchFactory, erro
 		}
 	}
 
-	// WIP: Remove later, shouldn't be enabled by default?
+	// TODO: remove later, shouldn't be enabled by default?
 	wf.informers[egressQosType], err = newInformer(egressQosType, wf.egressQosFactory.K8s().V1().EgressQoSes().Informer())
 	if err != nil {
 		return nil, err
@@ -230,6 +230,11 @@ func (wf *WatchFactory) Start() error {
 	// WIP as well
 	if wf.egressQosFactory != nil {
 		wf.egressQosFactory.Start(wf.stopChan)
+		for oType, synced := range wf.egressQosFactory.WaitForCacheSync(wf.stopChan) {
+			if !synced {
+				return fmt.Errorf("error in syncing cache for %v informer", oType)
+			}
+		}
 	}
 
 	return nil
