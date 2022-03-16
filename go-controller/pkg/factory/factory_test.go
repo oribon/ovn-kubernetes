@@ -225,6 +225,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		config.PrepareTestConfig()
 		config.OVNKubernetesFeature.EnableEgressIP = true
 		config.OVNKubernetesFeature.EnableEgressFirewall = true
+		config.OVNKubernetesFeature.EnableEgressQoS = true
 		config.Kubernetes.PlatformType = string(ocpconfigapi.AWSPlatformType)
 
 		fakeClient = &fake.Clientset{}
@@ -495,6 +496,19 @@ var _ = Describe("Watch Factory Operations", func() {
 		It("does not contain EgressFirewall informer", func() {
 			config.OVNKubernetesFeature.EnableEgressFirewall = false
 			testExisting(egressFirewallType)
+		})
+	})
+	Context("when EgressQoS is disabled", func() {
+		testExisting := func(objType reflect.Type) {
+			wf, err = NewMasterWatchFactory(ovnClientset)
+			Expect(err).NotTo(HaveOccurred())
+			err = wf.Start()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wf.informers).NotTo(HaveKey(objType))
+		}
+		It("does not contain EgressQoS informer", func() {
+			config.OVNKubernetesFeature.EnableEgressQoS = false
+			testExisting(egressQoSType)
 		})
 	})
 

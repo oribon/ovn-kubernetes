@@ -387,8 +387,10 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 
 	}
 
-	// TODO: conditional
-	oc.WatchEgressQoS()
+	if config.OVNKubernetesFeature.EnableEgressQoS {
+		oc.WatchEgressQoS()
+	}
+
 	klog.Infof("Completing all the Watchers took %v", time.Since(start))
 
 	if config.Kubernetes.OVNEmptyLbEvents {

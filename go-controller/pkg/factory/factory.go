@@ -85,7 +85,7 @@ var (
 	egressFirewallType       reflect.Type = reflect.TypeOf(&egressfirewallapi.EgressFirewall{})
 	egressIPType             reflect.Type = reflect.TypeOf(&egressipapi.EgressIP{})
 	cloudPrivateIPConfigType reflect.Type = reflect.TypeOf(&ocpcloudnetworkapi.CloudPrivateIPConfig{})
-	egressQosType            reflect.Type = reflect.TypeOf(&egressqosapi.EgressQoS{})
+	egressQoSType            reflect.Type = reflect.TypeOf(&egressqosapi.EgressQoS{})
 )
 
 // NewMasterWatchFactory initializes a new watch factory for the master or master+node processes.
@@ -185,11 +185,11 @@ func NewMasterWatchFactory(ovnClientset *util.OVNClientset) (*WatchFactory, erro
 			return nil, err
 		}
 	}
-
-	// TODO: remove later, shouldn't be enabled by default?
-	wf.informers[egressQosType], err = newInformer(egressQosType, wf.egressQosFactory.K8s().V1().EgressQoSes().Informer())
-	if err != nil {
-		return nil, err
+	if config.OVNKubernetesFeature.EnableEgressQoS {
+		wf.informers[egressQoSType], err = newInformer(egressQoSType, wf.egressQosFactory.K8s().V1().EgressQoSes().Informer())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return wf, nil
@@ -227,8 +227,7 @@ func (wf *WatchFactory) Start() error {
 			}
 		}
 	}
-	// WIP as well
-	if wf.egressQosFactory != nil {
+	if config.OVNKubernetesFeature.EnableEgressQoS && wf.egressQosFactory != nil {
 		wf.egressQosFactory.Start(wf.stopChan)
 		for oType, synced := range wf.egressQosFactory.WaitForCacheSync(wf.stopChan) {
 			if !synced {
@@ -471,12 +470,12 @@ func (wf *WatchFactory) RemoveEgressFirewallHandler(handler *Handler) {
 
 // AddEgressFirewallHandler adds a handler function that will be executed on EgressFirewall object changes
 func (wf *WatchFactory) AddEgressQoSHandler(handlerFuncs cache.ResourceEventHandler, processExisting func([]interface{})) *Handler {
-	return wf.addHandler(egressQosType, "", nil, handlerFuncs, processExisting)
+	return wf.addHandler(egressQoSType, "", nil, handlerFuncs, processExisting)
 }
 
 // RemoveEgressFirewallHandler removes an EgressFirewall object event handler function
 func (wf *WatchFactory) RemoveEgressQoSHandler(handler *Handler) {
-	wf.removeHandler(egressQosType, handler)
+	wf.removeHandler(egressQoSType, handler)
 }
 
 // AddEgressIPHandler adds a handler function that will be executed on EgressIP object changes

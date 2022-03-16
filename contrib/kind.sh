@@ -584,6 +584,7 @@ create_ovn_kube_manifests() {
     --ovn-loglevel-nbctld="${OVN_LOG_LEVEL_NBCTLD}" \
     --egress-ip-enable=true \
     --egress-firewall-enable=true \
+    --egress-qos-enable=true \
     --v4-join-subnet="${JOIN_SUBNET_IPV4}" \
     --v6-join-subnet="${JOIN_SUBNET_IPV6}" \
     --ex-gw-network-interface="${OVN_EX_GW_NETWORK_INTERFACE}"

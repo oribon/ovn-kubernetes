@@ -380,7 +380,7 @@ func newInformerLister(oType reflect.Type, sharedInformer cache.SharedIndexInfor
 		return egressiplister.NewEgressIPLister(sharedInformer.GetIndexer()), nil
 	case cloudPrivateIPConfigType:
 		return cloudprivateipconfiglister.NewCloudPrivateIPConfigLister(sharedInformer.GetIndexer()), nil
-	case egressQosType:
+	case egressQoSType:
 		return egressqoslister.NewEgressQoSLister(sharedInformer.GetIndexer()), nil
 	}
 

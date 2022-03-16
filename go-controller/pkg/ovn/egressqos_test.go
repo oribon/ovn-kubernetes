@@ -31,7 +31,7 @@ func newEgressQoSObject(name, namespace string, egressRules []egressqosapi.Egres
 	}
 }
 
-// TODO: tables for lgw/sgw
+// TODO oribon: tables for lgw/sgw
 var _ = ginkgo.Describe("OVN EgressQoS Operations for local gateway mode", func() {
 	var (
 		app     *cli.App
@@ -50,6 +50,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for local gateway mode", func(
 		// Restore global default values before each testcase
 		config.PrepareTestConfig()
 		config.Gateway.Mode = config.GatewayModeLocal
+		config.OVNKubernetesFeature.EnableEgressQoS = true
 
 		app = cli.NewApp()
 		app.Name = "test"
