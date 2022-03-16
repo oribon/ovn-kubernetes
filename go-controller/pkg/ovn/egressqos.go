@@ -107,8 +107,8 @@ func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, h
 		return err
 	}
 
+	opModels := []libovsdbops.OperationModel{}
 	for _, r := range eq.rules {
-		opModels := []libovsdbops.OperationModel{}
 		match := generateEgressQoSMatch(r, hashedAddressSetNameIPv4, hashedAddressSetNameIPv6)
 		qos := nbdb.QoS{
 			Direction:   nbdb.QoSDirectionFromLport,
@@ -130,41 +130,40 @@ func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, h
 			DoAfter: func() {
 				if qos.UUID != "" {
 					for _, sw := range logicalSwitches {
-						sw.QOSRules = []string{qos.UUID}
+						sw.QOSRules = append(sw.QOSRules, qos.UUID)
 					}
 				}
 			},
 		})
+	}
 
-		for _, sw := range logicalSwitches {
-			lsn := sw.Name
-			opModels = append(opModels, libovsdbops.OperationModel{
-				Name:           sw.Name,
-				Model:          sw,
-				ModelPredicate: func(ls *nbdb.LogicalSwitch) bool { return ls.Name == lsn },
-				OnModelMutations: []interface{}{
-					&sw.QOSRules,
-				},
-				ErrNotFound: true,
-			})
-		}
+	for _, sw := range logicalSwitches {
+		lsn := sw.Name
+		opModels = append(opModels, libovsdbops.OperationModel{
+			Name:           sw.Name,
+			Model:          sw,
+			ModelPredicate: func(ls *nbdb.LogicalSwitch) bool { return ls.Name == lsn },
+			OnModelMutations: []interface{}{
+				&sw.QOSRules,
+			},
+			ErrNotFound: true,
+		})
+	}
 
-		// TODO: do it in one transaction instead loop?
-		if _, err := oc.modelClient.CreateOrUpdate(opModels...); err != nil {
-			return fmt.Errorf("failed to create qos, err: %s", err)
-		}
+	if _, err := oc.modelClient.CreateOrUpdate(opModels...); err != nil {
+		return fmt.Errorf("failed to create qos, err: %s", err)
 	}
 
 	return nil
 }
 
 func (oc *Controller) updateEgressQoS(old, new *egressqosapi.EgressQoS) error {
-	updateErrors := oc.deleteEgressQoS(old)
-	if updateErrors != nil {
-		return updateErrors
+	err := oc.deleteEgressQoS(old)
+	if err != nil {
+		return fmt.Errorf("failed to update EgressQoS, err: %s", err)
 	}
-	updateErrors = oc.addEgressQoS(new)
-	return updateErrors
+	err = oc.addEgressQoS(new)
+	return fmt.Errorf("failed to update EgressQoS, err: %s", err)
 }
 
 func (oc *Controller) deleteEgressQoS(eqObj *egressqosapi.EgressQoS) error {
@@ -186,51 +185,46 @@ func (oc *Controller) deleteEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 	eq.Lock()
 	defer eq.Unlock()
 
-	as, err := oc.addressSetFactory.EnsureAddressSet(eq.namespace)
-	if err != nil {
-		return fmt.Errorf("cannot Ensure that addressSet for namespace %s exists %v", eq.namespace, err)
-	}
-	ipv4HashedAS, ipv6HashedAS := as.GetASHashNames()
-
 	logicalSwitches, err := oc.egressQoSSwitches()
 	if err != nil {
 		return err
 	}
-	for _, r := range eq.rules {
-		opModels := []libovsdbops.OperationModel{}
-		match := generateEgressQoSMatch(r, ipv4HashedAS, ipv6HashedAS)
-		qos := nbdb.QoS{}
-		opModels = append(opModels, libovsdbops.OperationModel{
-			Model: &qos,
+
+	qosRes := []nbdb.QoS{}
+	opModels := []libovsdbops.OperationModel{
+		{
 			ModelPredicate: func(q *nbdb.QoS) bool {
-				return strings.Contains(q.Match, match) && q.Priority == r.priority
+				eqNs, ok := q.ExternalIDs["EgressQoS"]
+				if !ok { // the QoS is not managed by an EgressQoS
+					return false
+				}
+				return eqNs == eq.namespace
 			},
+			ExistingResult: &qosRes,
 			DoAfter: func() {
-				if qos.UUID != "" {
-					for _, sw := range logicalSwitches {
-						sw.QOSRules = []string{qos.UUID}
-					}
+				uuids := libovsdbops.ExtractUUIDsFromModels(&qosRes)
+				for _, sw := range logicalSwitches {
+					sw.QOSRules = uuids
 				}
 			},
+			BulkOp: true,
+		},
+	}
+
+	for _, sw := range logicalSwitches {
+		lsn := sw.Name
+		opModels = append(opModels, libovsdbops.OperationModel{
+			Name:           sw.Name,
+			Model:          sw,
+			ModelPredicate: func(ls *nbdb.LogicalSwitch) bool { return ls.Name == lsn },
+			OnModelMutations: []interface{}{
+				&sw.QOSRules,
+			},
 		})
+	}
 
-		for _, sw := range logicalSwitches {
-			lsn := sw.Name
-			opModels = append(opModels, libovsdbops.OperationModel{
-				Name:           sw.Name,
-				Model:          sw,
-				ModelPredicate: func(ls *nbdb.LogicalSwitch) bool { return ls.Name == lsn },
-				OnModelMutations: []interface{}{
-					&sw.QOSRules,
-				},
-				ErrNotFound: true,
-			})
-		}
-
-		// TODO: do it in one transaction instead loop?
-		if err := oc.modelClient.Delete(opModels...); err != nil {
-			return fmt.Errorf("failed to delete qos, err: %s", err)
-		}
+	if err := oc.modelClient.Delete(opModels...); err != nil {
+		return fmt.Errorf("failed to delete qos, err: %s", err)
 	}
 
 	return nil
