@@ -39,6 +39,7 @@ require (
 	github.com/onsi/gomega v1.14.0
 	github.com/ovn-org/ovn-kubernetes/go-controller v0.0.0-00010101000000-000000000000
 	github.com/pkg/errors v0.9.1
+	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	k8s.io/api v0.23.3
 	k8s.io/apimachinery v0.23.3
 	k8s.io/client-go v0.23.3

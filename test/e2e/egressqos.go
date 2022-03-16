@@ -3,8 +3,8 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"sync"
 
+	"golang.org/x/sync/errgroup"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/onsi/ginkgo"
@@ -67,19 +67,16 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 
 	ginkgotable.DescribeTable("Should validate correct DSCP value on packets coming from a pod",
 		func(tcpDumpTpl string, dstIP *string, prefix string) {
-			tcpDumpSync := sync.WaitGroup{}
-			checkPingOnPod := func(pod string) error {
-				defer ginkgo.GinkgoRecover()
-				defer tcpDumpSync.Done()
-				_, err := framework.RunKubectl(f.Namespace.Name, "exec", dstPodName, "--", "timeout", "10",
-					"tcpdump", "-i", "any", "-c", "1", "-v", fmt.Sprintf(tcpDumpTpl, dscpValue))
-				framework.ExpectNoError(err, "Failed to detect ping with correct DSCP on pod %s", dstPodName)
-				framework.Logf("ICMP packet with correct DSCP successfully detected on pod %s", dstPodName)
-				return nil
+			tcpDumpSync := errgroup.Group{}
+			checkPingOnPod := func(pod string, dscp int) error {
+				_, err := framework.RunKubectl(f.Namespace.Name, "exec", pod, "--", "timeout", "5",
+					"tcpdump", "-i", "any", "-c", "1", "-v", fmt.Sprintf(tcpDumpTpl, dscp))
+				return err
 			}
 
-			tcpDumpSync.Add(1)
-			go checkPingOnPod(dstPodName)
+			tcpDumpSync.Go(func() error {
+				return checkPingOnPod(dstPodName, dscpValue)
+			})
 
 			eq := &egressqosapi.EgressQoS{
 				ObjectMeta: metav1.ObjectMeta{
@@ -96,18 +93,46 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 				},
 			}
 
-			_, err := testClient.EgressQoSes(f.Namespace.Name).Create(context.TODO(), eq, metav1.CreateOptions{})
+			// Create
+			eq, err := testClient.EgressQoSes(f.Namespace.Name).Create(context.TODO(), eq, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
 
 			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dstIP)
 			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPodName, dstIP, dstPodName)
 
-			tcpDumpSync.Wait()
+			err = tcpDumpSync.Wait()
+			framework.ExpectNoError(err, "Failed to detect ping with correct DSCP on pod %s", dstPodName)
+
+			// Update
+			newDSCP := dscpValue - 10
+			eq.Spec.Egress[0].DSCP = newDSCP
+			eq, err = testClient.EgressQoSes(f.Namespace.Name).Update(context.TODO(), eq, metav1.UpdateOptions{})
+			framework.ExpectNoError(err)
+
+			tcpDumpSync.Go(func() error {
+				return checkPingOnPod(dstPodName, newDSCP)
+			})
+
+			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dstIP)
+			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPodName, dstIP, dstPodName)
+
+			err = tcpDumpSync.Wait()
+			framework.ExpectNoError(err, "Failed to detect ping with correct DSCP on pod %s", dstPodName)
 
 			err = testClient.EgressQoSes(f.Namespace.Name).Delete(context.TODO(), eq.Name, metav1.DeleteOptions{})
 			framework.ExpectNoError(err)
+
+			tcpDumpSync.Go(func() error {
+				return checkPingOnPod(dstPodName, 0)
+			})
+
+			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dstIP)
+			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPodName, dstIP, dstPodName)
+
+			err = tcpDumpSync.Wait()
+			framework.ExpectNoError(err, "Ping detected with a DSCP value on pod %s", dstPodName)
 		},
 		// tcpdump args: http://darenmatthews.com/blog/?p=1199 , https://www.tucny.com/home/dscp-tos
 		ginkgotable.Entry("ipv4", "icmp and (ip and (ip[1] & 0xfc) >> 2 == %d)", &dstPodIPv4, "/32"),
-		ginkgotable.Entry("ipv6", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPodIPv6, "/128"))
+		ginkgotable.Entry("BBBB ipv6", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPodIPv6, "/128"))
 })
