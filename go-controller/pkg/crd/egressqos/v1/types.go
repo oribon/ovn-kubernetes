@@ -56,6 +56,12 @@ type EgressQoSRule struct {
 
 	// DstCIDR specifies the destination's CIDR. Only traffic heading to this CIDR will be marked with DSCP.
 	DstCIDR string `json:"dstCIDR"`
+
+	// PodSelector applies the QoS rule only to the pods in the namespace whose label
+	// matches this definition. This field is optional, and in case it is not set
+	// results in the rule being applied to all pods in the namespace.
+	// +optional
+	PodSelector metav1.LabelSelector `json:"podSelector,omitempty"`
 }
 
 // EgressQoSStatus defines the observed state of EgressQoS

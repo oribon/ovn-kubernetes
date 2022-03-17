@@ -10,10 +10,12 @@ import (
 	egressqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/pkg/errors"
 
-	"k8s.io/apimachinery/pkg/util/sets"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 )
@@ -23,16 +25,18 @@ type egressQos struct {
 	name      string
 	namespace string
 	rules     []*egressQosRule
+	// addrsets = per rule: egressQosPrefix + namespace + priority
 }
 
 type egressQosRule struct {
 	priority    int
 	dscp        int
 	destination string
+	addrSet     addressset.AddressSet
 }
 
 const (
-	EgressQoSFlowStartPriority = 1000
+	EgressQoSFlowStartPriority = 1000 // ?
 )
 
 // cloneEgressQoS shallow copies the egressqosapi.EgressQoS object provided.
@@ -45,17 +49,55 @@ func cloneEgressQoS(raw *egressqosapi.EgressQoS) *egressQos {
 	return eq
 }
 
-// implement destination validation
-func cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, priority int) (*egressQosRule, error) {
+// setup rule stuff
+func (oc *Controller) cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, namespace string, priority int) (*egressQosRule, error) {
 	_, _, err := net.ParseCIDR(raw.DstCIDR)
 	if err != nil {
 		return nil, err
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(&raw.PodSelector)
+	if err != nil {
+		return nil, err
+	}
+
+	var addrSet addressset.AddressSet
+	if !selector.Empty() {
+		pods, err := oc.watchFactory.GetPodsBySelector(namespace, raw.PodSelector)
+		if err != nil {
+			return nil, err
+		}
+
+		addrSet, err = oc.addressSetFactory.EnsureAddressSet(fmt.Sprintf("%s%s-%d", types.EgressQoSRulePrefix, namespace, priority))
+		if err != nil {
+			return nil, err
+		}
+
+		podsIps := []net.IP{}
+		for _, pod := range pods {
+			logicalPort, err := oc.logicalPortCache.get(util.GetLogicalPortName(pod.Namespace, pod.Name))
+			if err != nil {
+				return nil, err
+			}
+
+			podsIps = append(podsIps, createIPAddressSlice(logicalPort.ips)...)
+		}
+		err = addrSet.SetIPs(podsIps)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		addrSet, err = oc.addressSetFactory.EnsureAddressSet(namespace)
+		if err != nil {
+			return nil, fmt.Errorf("cannot ensure that addressSet for namespace %s exists %v", namespace, err)
+		}
 	}
 
 	eqr := &egressQosRule{
 		priority:    priority,
 		dscp:        raw.DSCP,
 		destination: raw.DstCIDR,
+		addrSet:     addrSet,
 	}
 
 	return eqr, nil
@@ -73,9 +115,9 @@ func (oc *Controller) addEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 	eq.Lock()
 	defer eq.Unlock()
 
-	var addErrors error
+	addErrors := errors.New("")
 	for i, rule := range eqObj.Spec.Egress {
-		eqr, err := cloneEgressQoSRule(rule, EgressQoSFlowStartPriority-i)
+		eqr, err := oc.cloneEgressQoSRule(rule, eq.namespace, EgressQoSFlowStartPriority-i)
 		if err != nil {
 			addErrors = errors.Wrapf(addErrors, "error: cannot create egressqos Rule to destination %s for namespace %s - %v",
 				rule.DstCIDR, eq.namespace, err)
@@ -83,17 +125,11 @@ func (oc *Controller) addEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 		}
 		eq.rules = append(eq.rules, eqr)
 	}
-	if addErrors != nil {
+	if addErrors.Error() != "" {
 		return addErrors
 	}
 
-	as, err := oc.addressSetFactory.EnsureAddressSet(eq.namespace)
-	if err != nil {
-		return fmt.Errorf("cannot Ensure that addressSet for namespace %s exists %v", eq.namespace, err)
-	}
-	ipv4HashedAS, ipv6HashedAS := as.GetASHashNames()
-
-	err = oc.createEgressQoS(eq, ipv4HashedAS, ipv6HashedAS)
+	err := oc.createEgressQoS(eq)
 	if err != nil {
 		return err
 	}
@@ -101,7 +137,7 @@ func (oc *Controller) addEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 	return nil
 }
 
-func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, hashedAddressSetNameIPv6 string) error {
+func (oc *Controller) createEgressQoS(eq *egressQos) error {
 	logicalSwitches, err := oc.egressQoSSwitches()
 	if err != nil {
 		return err
@@ -109,7 +145,8 @@ func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, h
 
 	opModels := []libovsdbops.OperationModel{}
 	for _, r := range eq.rules {
-		match := generateEgressQoSMatch(r, hashedAddressSetNameIPv4, hashedAddressSetNameIPv6)
+		hashedIPv4, hashedIPv6 := r.addrSet.GetASHashNames()
+		match := generateEgressQoSMatch(r, hashedIPv4, hashedIPv6)
 		qos := nbdb.QoS{
 			Direction:   nbdb.QoSDirectionFromLport,
 			Match:       match,
@@ -160,10 +197,10 @@ func (oc *Controller) createEgressQoS(eq *egressQos, hashedAddressSetNameIPv4, h
 func (oc *Controller) updateEgressQoS(old, new *egressqosapi.EgressQoS) error {
 	err := oc.deleteEgressQoS(old)
 	if err != nil {
-		return fmt.Errorf("failed to update EgressQoS, err: %s", err)
+		return err
 	}
-	err = oc.addEgressQoS(new)
-	return fmt.Errorf("failed to update EgressQoS, err: %s", err)
+
+	return oc.addEgressQoS(new)
 }
 
 func (oc *Controller) deleteEgressQoS(eqObj *egressqosapi.EgressQoS) error {
@@ -227,28 +264,45 @@ func (oc *Controller) deleteEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 		return fmt.Errorf("failed to delete qos, err: %s", err)
 	}
 
+	addrSetList := []nbdb.AddressSet{}
+	addrSetOpModels := []libovsdbops.OperationModel{
+		{
+			ModelPredicate: func(as *nbdb.AddressSet) bool {
+				return strings.Contains(as.ExternalIDs["name"], types.EgressQoSRulePrefix+eq.namespace)
+			},
+			ExistingResult: &addrSetList,
+			BulkOp:         true,
+		},
+	}
+	if err := oc.modelClient.Delete(addrSetOpModels...); err != nil {
+		return fmt.Errorf("failed to remove egress qos address sets, err: %v", err)
+	}
+
 	return nil
 }
 
 // This takes care of syncing stale data which we might have in OVN if
 // there's no ovnkube-master running for a while.
 // It will delete QoSes from EgressQoSes which have been deleted while ovnkube-master was down.
+// It will also delete stale Address Sets.
 func (oc *Controller) syncEgressQoSes(eqs []interface{}) {
 	oc.syncWithRetry("syncEgressQoses", func() error {
-		nsWithEgressQoS := sets.NewString()
-		for _, eq := range eqs {
-			egressQos, ok := eq.(*egressqosapi.EgressQoS)
-			if !ok {
-				continue
+		/*
+			nsWithEgressQoS := sets.NewString()
+			for _, eq := range eqs {
+				egressQos, ok := eq.(*egressqosapi.EgressQoS)
+				if !ok {
+					continue
+				}
+				nsWithEgressQoS.Insert(egressQos.Namespace)
 			}
-			nsWithEgressQoS.Insert(egressQos.Namespace)
-		}
+		*/
 
-		return oc.deleteStaleEgressQoS(nsWithEgressQoS)
+		return oc.deleteStaleEgressQoS( /*nsWithEgressQoS*/ )
 	})
 }
 
-func (oc *Controller) deleteStaleEgressQoS(nsWithEgressQoS sets.String) error {
+func (oc *Controller) deleteStaleEgressQoS() error {
 	qosRes := []nbdb.QoS{}
 	logicalSwitches, err := oc.egressQoSSwitches()
 	if err != nil {
@@ -260,9 +314,6 @@ func (oc *Controller) deleteStaleEgressQoS(nsWithEgressQoS sets.String) error {
 			ModelPredicate: func(q *nbdb.QoS) bool {
 				eqNs, ok := q.ExternalIDs["EgressQoS"]
 				if !ok { // the QoS is not managed by an EgressQoS
-					return false
-				}
-				if nsWithEgressQoS.Has(eqNs) { // it'll be reconciled later, not stale
 					return false
 				}
 
@@ -294,6 +345,20 @@ func (oc *Controller) deleteStaleEgressQoS(nsWithEgressQoS sets.String) error {
 
 	if err := oc.modelClient.Delete(opModels...); err != nil {
 		return fmt.Errorf("unable to remove stale qoses, err: %v", err)
+	}
+
+	addrSetList := []nbdb.AddressSet{}
+	addrSetOpModels := []libovsdbops.OperationModel{
+		{
+			ModelPredicate: func(as *nbdb.AddressSet) bool {
+				return strings.Contains(as.ExternalIDs["name"], types.EgressQoSRulePrefix)
+			},
+			ExistingResult: &addrSetList,
+			BulkOp:         true,
+		},
+	}
+	if err := oc.modelClient.Delete(addrSetOpModels...); err != nil {
+		return fmt.Errorf("failed to remove stale egress qos address sets, err: %v", err)
 	}
 
 	return nil

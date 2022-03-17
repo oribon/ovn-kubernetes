@@ -51,7 +51,7 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 				len(nodes.Items))
 		}
 
-		_, err = createPod(f, srcPodName, nodes.Items[0].Name, f.Namespace.Name, []string{}, map[string]string{})
+		_, err = createPod(f, srcPodName, nodes.Items[0].Name, f.Namespace.Name, []string{}, map[string]string{"app": "fe"})
 		framework.ExpectNoError(err)
 
 		dstPod1, err := createPod(f, dstPod1Name, nodes.Items[1].Name, f.Namespace.Name, []string{}, map[string]string{}, func(p *v1.Pod) {
@@ -107,6 +107,11 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 						{
 							DSCP:    dscpValue - 2,
 							DstCIDR: *dst2IP + prefix2,
+							PodSelector: metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"app": "fe",
+								},
+							},
 						},
 					},
 				},
