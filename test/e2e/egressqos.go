@@ -19,16 +19,19 @@ import (
 
 var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 	const (
-		srcPodName = "src-dscp-pod"
-		dstPodName = "dst-dscp-pod"
-		dscpValue  = 50
+		srcPodName  = "src-dscp-pod"
+		dstPod1Name = "dst-dscp-pod1"
+		dstPod2Name = "dst-dscp-pod2"
+		dscpValue   = 50
 	)
 
 	var (
-		clientSet  kubernetes.Interface
-		dstPodIPv4 string
-		dstPodIPv6 string
-		testClient egressqosclient.K8sV1Interface
+		clientSet   kubernetes.Interface
+		dstPod1IPv4 string // todo: podname -> cidr maps (v4/v6)?
+		dstPod1IPv6 string
+		dstPod2IPv4 string
+		dstPod2IPv6 string
+		testClient  egressqosclient.K8sV1Interface
 	)
 
 	f := framework.NewDefaultFramework("egressqos")
@@ -40,18 +43,27 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 		testClient, err = egressqosclient.NewForConfig(clientconfig)
 		framework.ExpectNoError(err)
 
-		nodes, err := e2enode.GetBoundedReadySchedulableNodes(clientSet, 2)
+		nodes, err := e2enode.GetBoundedReadySchedulableNodes(clientSet, 3)
 		framework.ExpectNoError(err)
-		if len(nodes.Items) < 2 {
+		if len(nodes.Items) < 3 {
 			framework.Failf(
-				"Test requires >= 2 Ready nodes, but there are only %v nodes",
+				"Test requires >= 3 Ready nodes, but there are only %v nodes",
 				len(nodes.Items))
 		}
 
 		_, err = createPod(f, srcPodName, nodes.Items[0].Name, f.Namespace.Name, []string{}, map[string]string{})
 		framework.ExpectNoError(err)
 
-		dstPod, err := createPod(f, dstPodName, nodes.Items[1].Name, f.Namespace.Name, []string{}, map[string]string{}, func(p *v1.Pod) {
+		dstPod1, err := createPod(f, dstPod1Name, nodes.Items[1].Name, f.Namespace.Name, []string{}, map[string]string{}, func(p *v1.Pod) {
+			p.Spec.Containers[0].Image = "quay.io/obraunsh/iperf3:tcpdump" // TODO: remove this, find better image with tcpdump
+			p.Spec.Containers[0].Command = []string{"sleep"}
+			p.Spec.Containers[0].Args = []string{"500000"}
+			p.Spec.HostNetwork = true
+		})
+		framework.ExpectNoError(err)
+		dstPod1IPv4, dstPod1IPv6 = getPodAddresses(dstPod1)
+
+		dstPod2, err := createPod(f, dstPod2Name, nodes.Items[2].Name, f.Namespace.Name, []string{}, map[string]string{}, func(p *v1.Pod) {
 			p.Spec.Containers[0].Image = "quay.io/obraunsh/iperf3:tcpdump" // TODO: remove this, find better image with tcpdump
 			p.Spec.Containers[0].Command = []string{"sleep"}
 			p.Spec.Containers[0].Args = []string{"500000"}
@@ -59,14 +71,14 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 		})
 		framework.ExpectNoError(err)
 
-		dstPodIPv4, dstPodIPv6 = getPodAddresses(dstPod)
+		dstPod2IPv4, dstPod2IPv6 = getPodAddresses(dstPod2)
 	})
 
 	ginkgo.AfterEach(func() {
 	})
 
 	ginkgotable.DescribeTable("Should validate correct DSCP value on packets coming from a pod",
-		func(tcpDumpTpl string, dstIP *string, prefix string) {
+		func(tcpDumpTpl string, dst1IP *string, prefix1 string, dst2IP *string, prefix2 string) {
 			tcpDumpSync := errgroup.Group{}
 			checkPingOnPod := func(pod string, dscp int) error {
 				_, err := framework.RunKubectl(f.Namespace.Name, "exec", pod, "--", "timeout", "5",
@@ -75,7 +87,10 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 			}
 
 			tcpDumpSync.Go(func() error {
-				return checkPingOnPod(dstPodName, dscpValue)
+				return checkPingOnPod(dstPod1Name, dscpValue-1)
+			})
+			tcpDumpSync.Go(func() error {
+				return checkPingOnPod(dstPod2Name, dscpValue-2)
 			})
 
 			eq := &egressqosapi.EgressQoS{
@@ -86,8 +101,12 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 				Spec: egressqosapi.EgressQoSSpec{
 					Egress: []egressqosapi.EgressQoSRule{
 						{
-							DSCP:    dscpValue,
-							DstCIDR: *dstIP + prefix,
+							DSCP:    dscpValue - 1,
+							DstCIDR: *dst1IP + prefix1,
+						},
+						{
+							DSCP:    dscpValue - 2,
+							DstCIDR: *dst2IP + prefix2,
 						},
 					},
 				},
@@ -97,42 +116,68 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 			eq, err := testClient.EgressQoSes(f.Namespace.Name).Create(context.TODO(), eq, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
 
-			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dstIP)
-			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPodName, dstIP, dstPodName)
+			// todo: ping sync
+			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dst1IP)
+			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPod1Name, dst1IP, dstPod1Name)
+
+			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dst2IP)
+			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPod1Name, dst1IP, dstPod1Name)
 
 			err = tcpDumpSync.Wait()
-			framework.ExpectNoError(err, "Failed to detect ping with correct DSCP on pod %s", dstPodName)
+			framework.ExpectNoError(err, "Failed to detect ping with correct DSCP on pod")
 
 			// Update
-			newDSCP := dscpValue - 10
-			eq.Spec.Egress[0].DSCP = newDSCP
+			eq.Spec.Egress = []egressqosapi.EgressQoSRule{
+				{
+					DSCP:    dscpValue - 10,
+					DstCIDR: *dst1IP + prefix1,
+				},
+				{
+					DSCP:    dscpValue - 20,
+					DstCIDR: *dst2IP + prefix2,
+				},
+			}
 			eq, err = testClient.EgressQoSes(f.Namespace.Name).Update(context.TODO(), eq, metav1.UpdateOptions{})
 			framework.ExpectNoError(err)
 
 			tcpDumpSync.Go(func() error {
-				return checkPingOnPod(dstPodName, newDSCP)
+				return checkPingOnPod(dstPod1Name, dscpValue-10)
+			})
+			tcpDumpSync.Go(func() error {
+				return checkPingOnPod(dstPod2Name, dscpValue-20)
 			})
 
-			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dstIP)
-			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPodName, dstIP, dstPodName)
+			// todo: ping sync
+			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dst1IP)
+			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPod1Name, dst1IP, dstPod1Name)
+
+			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dst2IP)
+			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPod1Name, dst1IP, dstPod1Name)
 
 			err = tcpDumpSync.Wait()
-			framework.ExpectNoError(err, "Failed to detect ping with correct DSCP on pod %s", dstPodName)
+			framework.ExpectNoError(err, "Failed to detect ping with correct DSCP")
 
 			err = testClient.EgressQoSes(f.Namespace.Name).Delete(context.TODO(), eq.Name, metav1.DeleteOptions{})
 			framework.ExpectNoError(err)
 
 			tcpDumpSync.Go(func() error {
-				return checkPingOnPod(dstPodName, 0)
+				return checkPingOnPod(dstPod1Name, 0)
+			})
+			tcpDumpSync.Go(func() error {
+				return checkPingOnPod(dstPod2Name, 0)
 			})
 
-			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dstIP)
-			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPodName, dstIP, dstPodName)
+			// todo: ping sync
+			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dst1IP)
+			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPod1Name, dst1IP, dstPod1Name)
+
+			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dst2IP)
+			framework.ExpectNoError(err, "Failed to ping %s %s from pod %s", dstPod1Name, dst1IP, dstPod1Name)
 
 			err = tcpDumpSync.Wait()
-			framework.ExpectNoError(err, "Ping detected with a DSCP value on pod %s", dstPodName)
+			framework.ExpectNoError(err, "Ping detected with a DSCP value")
 		},
 		// tcpdump args: http://darenmatthews.com/blog/?p=1199 , https://www.tucny.com/home/dscp-tos
-		ginkgotable.Entry("ipv4", "icmp and (ip and (ip[1] & 0xfc) >> 2 == %d)", &dstPodIPv4, "/32"),
-		ginkgotable.Entry("BBBB ipv6", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPodIPv6, "/128"))
+		ginkgotable.Entry("BBBB ipv4", "icmp and (ip and (ip[1] & 0xfc) >> 2 == %d)", &dstPod1IPv4, "/32", &dstPod2IPv4, "/32"),
+		ginkgotable.Entry("ipv6", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPod1IPv6, "/128", &dstPod2IPv6, "/128"))
 })
