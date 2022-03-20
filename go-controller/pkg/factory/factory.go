@@ -25,6 +25,7 @@ import (
 	egressqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
 	egressqosscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned/scheme"
 	egressqosinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions"
+	egressqosinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions/egressqos/v1"
 
 	kapi "k8s.io/api/core/v1"
 	knet "k8s.io/api/networking/v1"
@@ -654,6 +655,10 @@ func (wf *WatchFactory) NamespaceInformer() cache.SharedIndexInformer {
 
 func (wf *WatchFactory) ServiceInformer() cache.SharedIndexInformer {
 	return wf.informers[serviceType].inf
+}
+
+func (wf *WatchFactory) EgressQoSInformer() egressqosinformer.EgressQoSInformer {
+	return wf.egressQosFactory.K8s().V1().EgressQoSes()
 }
 
 // noHeadlessServiceSelector is a LabelSelector added to the watch for

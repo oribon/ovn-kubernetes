@@ -30,10 +30,10 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
 	egressfirewall "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	egressqosv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
 
 	utilnet "k8s.io/utils/net"
 
+	egressqoslisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/listers/egressqos/v1"
 	kapi "k8s.io/api/core/v1"
 	kapisnetworking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,6 +48,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	ref "k8s.io/client-go/tools/reference"
+	"k8s.io/client-go/util/workqueue"
+
 	"k8s.io/klog/v2"
 )
 
@@ -136,8 +138,11 @@ type Controller struct {
 	// egressFirewalls is a map of namespaces and the egressFirewall attached to it
 	egressFirewalls sync.Map
 
-	// egressQoses is a map of namespaces and the egressQos attached to it
-	egressQoses sync.Map
+	// EgressQoS
+	egressQoSLister egressqoslisters.EgressQoSLister
+	egressQoSSynced cache.InformerSynced
+	egressQoSQueue  workqueue.RateLimitingInterface
+	egressQoSCache  sync.Map
 
 	// An address set factory that creates address sets
 	addressSetFactory addressset.AddressSetFactory
@@ -388,7 +393,12 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 	}
 
 	if config.OVNKubernetesFeature.EnableEgressQoS {
-		oc.WatchEgressQoS()
+		oc.initEgressQoSController(oc.watchFactory.EgressQoSInformer())
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			oc.runEgressQoSController(1, oc.stopChan)
+		}()
 	}
 
 	klog.Infof("Completing all the Watchers took %v", time.Since(start))
@@ -1256,6 +1266,7 @@ func (oc *Controller) WatchNodes() {
 	klog.Infof("Bootstrapping existing nodes and cleaning stale nodes took %v", time.Since(start))
 }
 
+/*
 // WatchEgressQoS starts the watching of EgressQoS resources and calls
 // back the appropriate handler logic
 func (oc *Controller) WatchEgressQoS() *factory.Handler {
@@ -1285,7 +1296,7 @@ func (oc *Controller) WatchEgressQoS() *factory.Handler {
 			klog.Info("Deleted EgressQoS!") // TODO: remove
 		},
 	}, oc.syncEgressQoSes)
-}
+} */
 
 // GetNetworkPolicyACLLogging retrieves ACL deny policy logging setting for the Namespace
 func (oc *Controller) GetNetworkPolicyACLLogging(ns string) *ACLLoggingLevels {

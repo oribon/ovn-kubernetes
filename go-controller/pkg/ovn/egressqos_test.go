@@ -19,13 +19,15 @@ import (
 	"github.com/urfave/cli/v2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 )
 
 func newEgressQoSObject(name, namespace string, egressRules []egressqosapi.EgressQoSRule) *egressqosapi.EgressQoS {
 	return &egressqosapi.EgressQoS{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			Name:            name,
+			Namespace:       namespace,
+			ResourceVersion: "1",
 		},
 		Spec: egressqosapi.EgressQoSSpec{
 			Egress: egressRules,
@@ -124,10 +126,11 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for local gateway mode", func(
 						DSCP:    60,
 					},
 				})
+				eq.ResourceVersion = "1"
 				_, err := fakeOVN.fakeClient.EgressQoSClient.K8sV1().EgressQoSes(namespaceT.Name).Create(context.TODO(), eq, metav1.CreateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				fakeOVN.controller.WatchEgressQoS()
+				fakeOVN.InitAndRunEgressQoSController()
 
 				qos1 := &nbdb.QoS{
 					Direction:   nbdb.QoSDirectionFromLport,
@@ -163,6 +166,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for local gateway mode", func(
 						DSCP:    40,
 					},
 				}
+				eq.ResourceVersion = "2"
 				_, err = fakeOVN.fakeClient.EgressQoSClient.K8sV1().EgressQoSes(namespaceT.Name).Update(context.TODO(), eq, metav1.UpdateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -298,10 +302,11 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for local gateway mode", func(
 						DSCP:    60,
 					},
 				})
+				eq.ResourceVersion = "1"
 				_, err := fakeOVN.fakeClient.EgressQoSClient.K8sV1().EgressQoSes(namespaceT.Name).Create(context.TODO(), eq, metav1.CreateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				fakeOVN.controller.WatchEgressQoS()
+				fakeOVN.InitAndRunEgressQoSController()
 
 				qos1 := &nbdb.QoS{
 					Direction:   nbdb.QoSDirectionFromLport,
@@ -343,6 +348,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for local gateway mode", func(
 						},
 					},
 				}
+				eq.ResourceVersion = "2"
 				_, err = fakeOVN.fakeClient.EgressQoSClient.K8sV1().EgressQoSes(namespaceT.Name).Update(context.TODO(), eq, metav1.UpdateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -388,7 +394,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for local gateway mode", func(
 		ginkgotable.Entry("ipv6", false, true, "2001:0db8:85a3:0000:0000:8a2e:0370:7334/128", "2001:0db8:85a3:0000:0000:8a2e:0370:7335/128",
 			"(ip6.dst == 2001:0db8:85a3:0000:0000:8a2e:0370:7334/128) && ip6.src == $a8797971422970482321",
 			"(ip6.dst == 2001:0db8:85a3:0000:0000:8a2e:0370:7335/128) && ip6.src == $a10481620741176717680"),
-		ginkgotable.Entry("BBBB dual", true, true, "1.2.3.4/32", "2001:0db8:85a3:0000:0000:8a2e:0370:7335/128",
+		ginkgotable.Entry("dual", true, true, "1.2.3.4/32", "2001:0db8:85a3:0000:0000:8a2e:0370:7335/128",
 			"(ip4.dst == 1.2.3.4/32) && (ip4.src == $a8797969223947225899 || ip6.src == $a8797971422970482321)",
 			"(ip6.dst == 2001:0db8:85a3:0000:0000:8a2e:0370:7335/128) && (ip4.src == $a10481622940199974102 || ip6.src == $a10481620741176717680)"),
 	)
@@ -474,7 +480,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for shared gateway mode", func
 				_, err := fakeOVN.fakeClient.EgressQoSClient.K8sV1().EgressQoSes(namespaceT.Name).Create(context.TODO(), eq, metav1.CreateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				fakeOVN.controller.WatchEgressQoS()
+				fakeOVN.InitAndRunEgressQoSController()
 
 				qos1 := &nbdb.QoS{
 					Direction:   nbdb.QoSDirectionFromLport,
@@ -567,10 +573,11 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for shared gateway mode", func
 						DSCP:    60,
 					},
 				})
+				eq.ResourceVersion = "1"
 				_, err := fakeOVN.fakeClient.EgressQoSClient.K8sV1().EgressQoSes(namespaceT.Name).Create(context.TODO(), eq, metav1.CreateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				fakeOVN.controller.WatchEgressQoS()
+				fakeOVN.InitAndRunEgressQoSController()
 
 				qos1 := &nbdb.QoS{
 					Direction:   nbdb.QoSDirectionFromLport,
@@ -606,6 +613,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for shared gateway mode", func
 						DSCP:    40,
 					},
 				}
+				eq.ResourceVersion = "2"
 				_, err = fakeOVN.fakeClient.EgressQoSClient.K8sV1().EgressQoSes(namespaceT.Name).Update(context.TODO(), eq, metav1.UpdateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -635,3 +643,11 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for shared gateway mode", func
 		})
 	})
 })
+
+func (o *FakeOVN) InitAndRunEgressQoSController() {
+	klog.Warningf("#### [%p] INIT EgressQoS", o)
+	o.controller.initEgressQoSController(o.watcher.EgressQoSInformer())
+	go func() {
+		o.controller.runEgressQoSController(1, o.stopChan)
+	}()
+}
