@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ovn-org/libovsdb/ovsdb"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	egressqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
 	egressqosinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions/egressqos/v1"
@@ -16,10 +17,14 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/pkg/errors"
+	kapi "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	v1coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -44,6 +49,8 @@ type egressQosRule struct {
 	dscp        int
 	destination string
 	addrSet     addressset.AddressSet
+	addrSetPods sets.String
+	podSelector labels.Selector
 }
 
 // shallow copies the EgressQoS object provided.
@@ -85,6 +92,7 @@ func (oc *Controller) cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, namespa
 	}
 
 	var addrSet addressset.AddressSet
+	podNames := sets.NewString()
 	if !selector.Empty() {
 		pods, err := oc.watchFactory.GetPodsBySelector(namespace, raw.PodSelector)
 		if err != nil {
@@ -98,12 +106,14 @@ func (oc *Controller) cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, namespa
 
 		podsIps := []net.IP{}
 		for _, pod := range pods {
-			logicalPort, err := oc.logicalPortCache.get(util.GetLogicalPortName(pod.Namespace, pod.Name))
-			if err != nil {
-				return nil, err
+			if util.PodWantsNetwork(pod) { // we don't handle HostNetworked pods
+				logicalPort, err := oc.logicalPortCache.get(util.GetLogicalPortName(pod.Namespace, pod.Name))
+				if err != nil {
+					return nil, err
+				}
+				podNames.Insert(pod.Name)
+				podsIps = append(podsIps, createIPAddressSlice(logicalPort.ips)...)
 			}
-
-			podsIps = append(podsIps, createIPAddressSlice(logicalPort.ips)...)
 		}
 		err = addrSet.SetIPs(podsIps)
 		if err != nil {
@@ -121,26 +131,41 @@ func (oc *Controller) cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, namespa
 		dscp:        raw.DSCP,
 		destination: raw.DstCIDR,
 		addrSet:     addrSet,
+		addrSetPods: podNames,
+		podSelector: selector,
 	}
 
 	return eqr, nil
 }
 
 // initEgressQoSController initializes the EgressQoS controller.
-func (oc *Controller) initEgressQoSController(eqInformer egressqosinformer.EgressQoSInformer) {
+func (oc *Controller) initEgressQoSController(
+	eqInformer egressqosinformer.EgressQoSInformer,
+	podInformer v1coreinformers.PodInformer) {
 	klog.Info("Setting up event handlers for EgressQoS")
-	eqInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    oc.onEgressQoSAdd,
-		UpdateFunc: oc.onEgressQoSUpdate,
-		DeleteFunc: oc.onEgressQoSDelete,
-	})
 	oc.egressQoSLister = eqInformer.Lister()
 	oc.egressQoSSynced = eqInformer.Informer().HasSynced
 	oc.egressQoSQueue = workqueue.NewNamedRateLimitingQueue(
 		workqueue.NewItemFastSlowRateLimiter(1*time.Second, 5*time.Second, 5),
 		"egressqos",
 	)
+	eqInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    oc.onEgressQoSAdd,
+		UpdateFunc: oc.onEgressQoSUpdate,
+		DeleteFunc: oc.onEgressQoSDelete,
+	})
 
+	oc.egressQoSPodLister = podInformer.Lister()
+	oc.egressQoSPodSynced = podInformer.Informer().HasSynced
+	oc.egressQoSPodQueue = workqueue.NewNamedRateLimitingQueue(
+		workqueue.NewItemFastSlowRateLimiter(1*time.Second, 5*time.Second, 5),
+		"egressqospods",
+	)
+	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    oc.onEgressQoSPodAdd,
+		UpdateFunc: oc.onEgressQoSPodUpdate,
+		DeleteFunc: func(obj interface{}) {}, // Deletes are handled in deleteLogicalPort
+	})
 }
 
 // onEgressQoSAdd queues the EgressQoS for processing.
@@ -194,6 +219,13 @@ func (oc *Controller) runEgressQoSController(threadiness int, stopCh <-chan stru
 		klog.Infof("Synchronization failed")
 		return
 	}
+
+	if !cache.WaitForCacheSync(stopCh, oc.egressQoSPodSynced) {
+		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		klog.Infof("Synchronization failed")
+		return
+	}
+
 	// run the repair controller
 	klog.Infof("Repairing EgressQoSes")
 	err := oc.repairEgressQoSes()
@@ -216,12 +248,23 @@ func (oc *Controller) runEgressQoSController(threadiness int, stopCh <-chan stru
 		}()
 	}
 
+	for i := 0; i < threadiness; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			wait.Until(func() {
+				oc.runEgressQoSPodWorker(wg)
+			}, time.Second, stopCh)
+		}()
+	}
+
 	// wait until we're told to stop
 	<-stopCh
 
 	klog.Infof("Shutting down EgressQoS controller")
 	// make sure the work queue is shutdown which will trigger workers to end
 	oc.egressQoSQueue.ShutDown()
+	oc.egressQoSPodQueue.ShutDown()
 	// wait for workers to finish
 	wg.Wait()
 }
@@ -374,7 +417,7 @@ func (oc *Controller) syncEgressQoS(key string) error {
 		return nil
 	}
 
-	klog.Infof("EgressQoS %s retrieved from lister: %v", eq.Name, eq)
+	klog.V(5).Infof("EgressQoS %s retrieved from lister: %v", eq.Name, eq)
 
 	return oc.addEgressQoSNS(eq)
 }
@@ -578,4 +621,165 @@ func (oc *Controller) egressQoSSwitches() ([]*nbdb.LogicalSwitch, error) {
 	logicalSwitches = append(logicalSwitches, joinSw)
 
 	return logicalSwitches, nil
+}
+
+func (oc *Controller) syncEgressQoSPod(key string) error {
+	startTime := time.Now()
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return err
+	}
+
+	klog.Infof("Processing sync for EgressQoS pod %s/%s", namespace, name)
+	obj, loaded := oc.egressQoSCache.Load(namespace)
+	if !loaded { // no EgressQoS in the namespace
+		return nil
+	}
+
+	eq := obj.(*egressQos)
+	eq.Lock()
+	defer eq.Unlock()
+
+	defer func() {
+		klog.V(4).Infof("Finished syncing EgressQoS pod %s on namespace %s : %v", name, namespace, time.Since(startTime))
+	}()
+
+	// Get current Pod from the cache
+	pod, err := oc.egressQoSPodLister.Pods(namespace).Get(name)
+	// It´s unlikely that we have an error different that "Not Found Object"
+	// because we are getting the object from the informer´s cache
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	// TODO(?): the pod was deleted, we can't process as we can't fetch the ips.
+	// for now deletions are part of deleteLogicalPort.
+	if pod == nil {
+		return nil
+	}
+
+	klog.V(5).Infof("Pod %s retrieved from lister: %v", pod.Name, pod)
+
+	if !util.PodWantsNetwork(pod) { // we don't handle HostNetworked pods
+		return nil
+	}
+
+	logicalPort, err := oc.logicalPortCache.get(util.GetLogicalPortName(pod.Namespace, pod.Name))
+	if err != nil {
+		return err
+	}
+
+	podIps := createIPAddressSlice(logicalPort.ips)
+	podLabels := labels.Set(pod.Labels)
+	for _, r := range eq.rules {
+		if r.podSelector.Empty() {
+			continue
+		}
+
+		// TODO: allOps = do one transaction
+		if r.podSelector.Matches(podLabels) && !r.addrSetPods.Has(pod.Name) {
+			err = r.addrSet.AddIPs(podIps)
+			if err != nil {
+				return err
+			}
+			r.addrSetPods.Insert(pod.Name)
+			continue
+		}
+
+		if !r.podSelector.Matches(podLabels) && r.addrSetPods.Has(pod.Name) {
+			err = r.addrSet.DeleteIPs(podIps)
+			if err != nil {
+				return err
+			}
+			r.addrSetPods.Delete(pod.Name)
+		}
+	}
+
+	return nil
+}
+
+// onEgressQoSPodAdd queues the pod for processing.
+func (oc *Controller) onEgressQoSPodAdd(obj interface{}) {
+	key, err := cache.MetaNamespaceKeyFunc(obj)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
+		return
+	}
+	klog.V(4).Infof("Adding EgressQoS Pod %s", key)
+	oc.egressQoSPodQueue.Add(key)
+}
+
+// onEgressQoSPodUpdate queues the pod for processing.
+func (oc *Controller) onEgressQoSPodUpdate(oldObj, newObj interface{}) {
+	oldPod := oldObj.(*kapi.Pod)
+	newPod := newObj.(*kapi.Pod)
+
+	// don't process resync on objects that are marked for deletion
+	if oldPod.ResourceVersion == newPod.ResourceVersion ||
+		!newPod.GetDeletionTimestamp().IsZero() {
+		return
+	}
+
+	key, err := cache.MetaNamespaceKeyFunc(newObj)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", newObj, err))
+		return
+	}
+
+	oc.egressQoSPodQueue.Add(key)
+}
+
+func (oc *Controller) deleteEgressQoSPod(name, namespace string, ips []net.IP) ([]ovsdb.Operation, error) {
+	allOps := []ovsdb.Operation{}
+	obj, loaded := oc.egressQoSCache.Load(namespace)
+	if !loaded { // no EgressQoS in the namespace
+		return allOps, nil
+	}
+
+	eq := obj.(*egressQos)
+	eq.Lock()
+	defer eq.Unlock()
+
+	for _, rule := range eq.rules {
+		if rule.addrSetPods.Has(name) {
+			ops, err := rule.addrSet.DeleteIPsReturnOps(ips)
+			if err != nil {
+				return nil, err
+			}
+			allOps = append(allOps, ops...)
+		}
+	}
+
+	return allOps, nil
+}
+
+func (oc *Controller) runEgressQoSPodWorker(wg *sync.WaitGroup) {
+	for oc.processNextEgressQoSPodWorkItem(wg) {
+	}
+}
+
+func (oc *Controller) processNextEgressQoSPodWorkItem(wg *sync.WaitGroup) bool {
+	wg.Add(1)
+	defer wg.Done()
+	key, quit := oc.egressQoSPodQueue.Get()
+	if quit {
+		return false
+	}
+	defer oc.egressQoSPodQueue.Done(key)
+
+	err := oc.syncEgressQoSPod(key.(string))
+	if err == nil {
+		oc.egressQoSPodQueue.Forget(key)
+		return true
+	}
+
+	utilruntime.HandleError(fmt.Errorf("%v failed with : %v", key, err))
+
+	if oc.egressQoSPodQueue.NumRequeues(key) < maxEgressQoSRetries {
+		oc.egressQoSPodQueue.AddRateLimited(key)
+		return true
+	}
+
+	oc.egressQoSPodQueue.Forget(key)
+	return true
 }

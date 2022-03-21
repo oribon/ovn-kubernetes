@@ -23,6 +23,7 @@ import (
 	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
 	svccontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 
 	lsm "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/logical_switch_manager"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/subnetallocator"
@@ -143,6 +144,10 @@ type Controller struct {
 	egressQoSSynced cache.InformerSynced
 	egressQoSQueue  workqueue.RateLimitingInterface
 	egressQoSCache  sync.Map
+
+	egressQoSPodLister corev1listers.PodLister
+	egressQoSPodSynced cache.InformerSynced
+	egressQoSPodQueue  workqueue.RateLimitingInterface
 
 	// An address set factory that creates address sets
 	addressSetFactory addressset.AddressSetFactory
@@ -393,7 +398,7 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 	}
 
 	if config.OVNKubernetesFeature.EnableEgressQoS {
-		oc.initEgressQoSController(oc.watchFactory.EgressQoSInformer())
+		oc.initEgressQoSController(oc.watchFactory.EgressQoSInformer(), oc.watchFactory.WIPPodInformer())
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1265,38 +1270,6 @@ func (oc *Controller) WatchNodes() {
 	}, oc.syncNodes)
 	klog.Infof("Bootstrapping existing nodes and cleaning stale nodes took %v", time.Since(start))
 }
-
-/*
-// WatchEgressQoS starts the watching of EgressQoS resources and calls
-// back the appropriate handler logic
-func (oc *Controller) WatchEgressQoS() *factory.Handler {
-	return oc.watchFactory.AddEgressQoSHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			egressQos := obj.(*egressqosv1.EgressQoS).DeepCopy()
-			err := oc.addEgressQoS(egressQos)
-			if err != nil {
-				klog.Error(err)
-			}
-			klog.Info("Added EgressQoS!") // TODO: remove
-		},
-		UpdateFunc: func(old, newer interface{}) {
-			oldEq := old.(*egressqosv1.EgressQoS).DeepCopy()
-			newEq := newer.(*egressqosv1.EgressQoS).DeepCopy()
-			if err := oc.updateEgressQoS(oldEq, newEq); err != nil {
-				klog.Error(err)
-			}
-			klog.Info("Updated EgressQoS!") // TODO: remove
-		},
-		DeleteFunc: func(obj interface{}) {
-			egressQos := obj.(*egressqosv1.EgressQoS).DeepCopy()
-			err := oc.deleteEgressQoS(egressQos)
-			if err != nil {
-				klog.Error(err)
-			}
-			klog.Info("Deleted EgressQoS!") // TODO: remove
-		},
-	}, oc.syncEgressQoSes)
-} */
 
 // GetNetworkPolicyACLLogging retrieves ACL deny policy logging setting for the Namespace
 func (oc *Controller) GetNetworkPolicyACLLogging(ns string) *ACLLoggingLevels {

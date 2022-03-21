@@ -32,6 +32,7 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 		dstPod2IPv4 string
 		dstPod2IPv6 string
 		testClient  egressqosclient.K8sV1Interface
+		srcNode     string
 	)
 
 	f := framework.NewDefaultFramework("egressqos")
@@ -51,8 +52,7 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 				len(nodes.Items))
 		}
 
-		_, err = createPod(f, srcPodName, nodes.Items[0].Name, f.Namespace.Name, []string{}, map[string]string{"app": "fe"})
-		framework.ExpectNoError(err)
+		srcNode = nodes.Items[0].Name
 
 		dstPod1, err := createPod(f, dstPod1Name, nodes.Items[1].Name, f.Namespace.Name, []string{}, map[string]string{}, func(p *v1.Pod) {
 			p.Spec.Containers[0].Image = "quay.io/obraunsh/iperf3:tcpdump" // TODO: remove this, find better image with tcpdump
@@ -78,20 +78,18 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 	})
 
 	ginkgotable.DescribeTable("Should validate correct DSCP value on packets coming from a pod",
-		func(tcpDumpTpl string, dst1IP *string, prefix1 string, dst2IP *string, prefix2 string) {
+		func(tcpDumpTpl string, dst1IP *string, prefix1 string, dst2IP *string, prefix2 string, beforeCR bool) {
+			if beforeCR {
+				_, err := createPod(f, srcPodName, srcNode, f.Namespace.Name, []string{}, map[string]string{"app": "test"})
+				framework.ExpectNoError(err)
+			}
+
 			tcpDumpSync := errgroup.Group{}
 			checkPingOnPod := func(pod string, dscp int) error {
-				_, err := framework.RunKubectl(f.Namespace.Name, "exec", pod, "--", "timeout", "5",
+				_, err := framework.RunKubectl(f.Namespace.Name, "exec", pod, "--", "timeout", "10",
 					"tcpdump", "-i", "any", "-c", "1", "-v", fmt.Sprintf(tcpDumpTpl, dscp))
 				return err
 			}
-
-			tcpDumpSync.Go(func() error {
-				return checkPingOnPod(dstPod1Name, dscpValue-1)
-			})
-			tcpDumpSync.Go(func() error {
-				return checkPingOnPod(dstPod2Name, dscpValue-2)
-			})
 
 			eq := &egressqosapi.EgressQoS{
 				ObjectMeta: metav1.ObjectMeta{
@@ -109,7 +107,7 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 							DstCIDR: *dst2IP + prefix2,
 							PodSelector: metav1.LabelSelector{
 								MatchLabels: map[string]string{
-									"app": "fe",
+									"app": "test",
 								},
 							},
 						},
@@ -120,6 +118,18 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 			// Create
 			eq, err := testClient.EgressQoSes(f.Namespace.Name).Create(context.TODO(), eq, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
+
+			if !beforeCR {
+				_, err := createPod(f, srcPodName, srcNode, f.Namespace.Name, []string{}, map[string]string{"app": "test"})
+				framework.ExpectNoError(err)
+			}
+
+			tcpDumpSync.Go(func() error {
+				return checkPingOnPod(dstPod1Name, dscpValue-1)
+			})
+			tcpDumpSync.Go(func() error {
+				return checkPingOnPod(dstPod2Name, dscpValue-2)
+			})
 
 			// todo: ping sync
 			_, err = framework.RunKubectl(f.Namespace.Name, "exec", srcPodName, "--", "ping", "-c", "3", *dst1IP)
@@ -183,6 +193,8 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 			framework.ExpectNoError(err, "Ping detected with a DSCP value")
 		},
 		// tcpdump args: http://darenmatthews.com/blog/?p=1199 , https://www.tucny.com/home/dscp-tos
-		ginkgotable.Entry("BBBB ipv4", "icmp and (ip and (ip[1] & 0xfc) >> 2 == %d)", &dstPod1IPv4, "/32", &dstPod2IPv4, "/32"),
-		ginkgotable.Entry("ipv6", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPod1IPv6, "/128", &dstPod2IPv6, "/128"))
+		ginkgotable.Entry("ipv4 before CR", "icmp and (ip and (ip[1] & 0xfc) >> 2 == %d)", &dstPod1IPv4, "/32", &dstPod2IPv4, "/32", true),
+		ginkgotable.Entry("ipv4 after CR", "icmp and (ip and (ip[1] & 0xfc) >> 2 == %d)", &dstPod1IPv4, "/32", &dstPod2IPv4, "/32", false),
+		ginkgotable.Entry("BBBB ipv6 before CR", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPod1IPv6, "/128", &dstPod2IPv6, "/128", true),
+		ginkgotable.Entry("BBBB ipv6 after CR", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPod1IPv6, "/128", &dstPod2IPv6, "/128", false))
 })

@@ -649,6 +649,11 @@ func (wf *WatchFactory) PodInformer() cache.SharedIndexInformer {
 	return wf.informers[podType].inf
 }
 
+// TODO: WIP: SHOULD BE REMOVED/REPLACED BY
+func (wf *WatchFactory) WIPPodInformer() v1coreinformers.PodInformer {
+	return wf.iFactory.Core().V1().Pods()
+}
+
 func (wf *WatchFactory) NamespaceInformer() cache.SharedIndexInformer {
 	return wf.informers[namespaceType].inf
 }
