@@ -195,6 +195,6 @@ var _ = ginkgo.Describe("e2e EgressQoS validation", func() {
 		// tcpdump args: http://darenmatthews.com/blog/?p=1199 , https://www.tucny.com/home/dscp-tos
 		ginkgotable.Entry("ipv4 before CR", "icmp and (ip and (ip[1] & 0xfc) >> 2 == %d)", &dstPod1IPv4, "/32", &dstPod2IPv4, "/32", true),
 		ginkgotable.Entry("ipv4 after CR", "icmp and (ip and (ip[1] & 0xfc) >> 2 == %d)", &dstPod1IPv4, "/32", &dstPod2IPv4, "/32", false),
-		ginkgotable.Entry("BBBB ipv6 before CR", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPod1IPv6, "/128", &dstPod2IPv6, "/128", true),
-		ginkgotable.Entry("BBBB ipv6 after CR", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPod1IPv6, "/128", &dstPod2IPv6, "/128", false))
+		ginkgotable.Entry("ipv6 before CR", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPod1IPv6, "/128", &dstPod2IPv6, "/128", true),
+		ginkgotable.Entry("ipv6 after CR", "icmp6 and (ip6 and (ip6[0:2] & 0xfc0) >> 6 == %d)", &dstPod1IPv6, "/128", &dstPod2IPv6, "/128", false))
 })

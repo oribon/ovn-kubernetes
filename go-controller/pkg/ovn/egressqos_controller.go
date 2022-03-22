@@ -623,6 +623,18 @@ func (oc *Controller) egressQoSSwitches() ([]*nbdb.LogicalSwitch, error) {
 	return logicalSwitches, nil
 }
 
+type setOp int
+
+const (
+	setInsert setOp = iota
+	setDelete
+)
+
+type setAndOp struct {
+	set sets.String
+	op  setOp
+}
+
 func (oc *Controller) syncEgressQoSPod(key string) error {
 	startTime := time.Now()
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -671,27 +683,44 @@ func (oc *Controller) syncEgressQoSPod(key string) error {
 
 	podIps := createIPAddressSlice(logicalPort.ips)
 	podLabels := labels.Set(pod.Labels)
+	allOps := []ovsdb.Operation{}
+	podSetops := []setAndOp{}
 	for _, r := range eq.rules {
 		if r.podSelector.Empty() {
 			continue
 		}
 
-		// TODO: allOps = do one transaction
 		if r.podSelector.Matches(podLabels) && !r.addrSetPods.Has(pod.Name) {
-			err = r.addrSet.AddIPs(podIps)
+			ops, err := r.addrSet.AddIPsReturnOps(podIps)
 			if err != nil {
 				return err
 			}
-			r.addrSetPods.Insert(pod.Name)
+			allOps = append(allOps, ops...)
+			podSetops = append(podSetops, setAndOp{r.addrSetPods, setInsert})
 			continue
 		}
 
 		if !r.podSelector.Matches(podLabels) && r.addrSetPods.Has(pod.Name) {
-			err = r.addrSet.DeleteIPs(podIps)
+			ops, err := r.addrSet.DeleteIPsReturnOps(podIps)
 			if err != nil {
 				return err
 			}
-			r.addrSetPods.Delete(pod.Name)
+			allOps = append(allOps, ops...)
+			podSetops = append(podSetops, setAndOp{r.addrSetPods, setDelete})
+		}
+	}
+
+	_, err = libovsdbops.TransactAndCheck(oc.nbClient, allOps)
+	if err != nil {
+		return err
+	}
+
+	for _, setOp := range podSetops {
+		switch setOp.op {
+		case setInsert:
+			setOp.set.Insert(pod.Name)
+		case setDelete:
+			setOp.set.Delete(pod.Name)
 		}
 	}
 
@@ -729,30 +758,6 @@ func (oc *Controller) onEgressQoSPodUpdate(oldObj, newObj interface{}) {
 	oc.egressQoSPodQueue.Add(key)
 }
 
-func (oc *Controller) deleteEgressQoSPod(name, namespace string, ips []net.IP) ([]ovsdb.Operation, error) {
-	allOps := []ovsdb.Operation{}
-	obj, loaded := oc.egressQoSCache.Load(namespace)
-	if !loaded { // no EgressQoS in the namespace
-		return allOps, nil
-	}
-
-	eq := obj.(*egressQos)
-	eq.Lock()
-	defer eq.Unlock()
-
-	for _, rule := range eq.rules {
-		if rule.addrSetPods.Has(name) {
-			ops, err := rule.addrSet.DeleteIPsReturnOps(ips)
-			if err != nil {
-				return nil, err
-			}
-			allOps = append(allOps, ops...)
-		}
-	}
-
-	return allOps, nil
-}
-
 func (oc *Controller) runEgressQoSPodWorker(wg *sync.WaitGroup) {
 	for oc.processNextEgressQoSPodWorkItem(wg) {
 	}
@@ -782,4 +787,29 @@ func (oc *Controller) processNextEgressQoSPodWorkItem(wg *sync.WaitGroup) bool {
 
 	oc.egressQoSPodQueue.Forget(key)
 	return true
+}
+
+func (oc *Controller) deleteEgressQoSPod(name, namespace string, ips []net.IP) ([]ovsdb.Operation, error) {
+	allOps := []ovsdb.Operation{}
+	obj, loaded := oc.egressQoSCache.Load(namespace)
+	if !loaded { // no EgressQoS in the namespace
+		return allOps, nil
+	}
+
+	eq := obj.(*egressQos)
+	eq.Lock()
+	defer eq.Unlock()
+
+	for _, rule := range eq.rules {
+		if rule.addrSetPods.Has(name) {
+			rule.addrSetPods.Delete(name)
+			ops, err := rule.addrSet.DeleteIPsReturnOps(ips)
+			if err != nil {
+				return nil, err
+			}
+			allOps = append(allOps, ops...)
+		}
+	}
+
+	return allOps, nil
 }
