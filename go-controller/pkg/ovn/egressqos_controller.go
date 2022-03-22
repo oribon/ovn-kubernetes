@@ -22,7 +22,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	v1coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -38,19 +37,20 @@ const (
 )
 
 type egressQos struct {
-	sync.Mutex
+	sync.RWMutex
 	name      string
 	namespace string
 	rules     []*egressQosRule
+	stale     bool
 }
 
 type egressQosRule struct {
-	priority    int
-	dscp        int
-	destination string
-	addrSet     addressset.AddressSet
-	addrSetPods sets.String
-	podSelector labels.Selector
+	priority      int
+	dscp          int
+	destination   string
+	addrSet       addressset.AddressSet
+	podsInAddrSet *sync.Map
+	podSelector   labels.Selector
 }
 
 // shallow copies the EgressQoS object provided.
@@ -92,7 +92,7 @@ func (oc *Controller) cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, namespa
 	}
 
 	var addrSet addressset.AddressSet
-	podNames := sets.NewString()
+	podNames := sync.Map{}
 	if !selector.Empty() {
 		pods, err := oc.watchFactory.GetPodsBySelector(namespace, raw.PodSelector)
 		if err != nil {
@@ -111,7 +111,7 @@ func (oc *Controller) cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, namespa
 				if err != nil {
 					return nil, err
 				}
-				podNames.Insert(pod.Name)
+				podNames.Store(pod.Name, "")
 				podsIps = append(podsIps, createIPAddressSlice(logicalPort.ips)...)
 			}
 		}
@@ -127,12 +127,12 @@ func (oc *Controller) cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, namespa
 	}
 
 	eqr := &egressQosRule{
-		priority:    priority,
-		dscp:        raw.DSCP,
-		destination: raw.DstCIDR,
-		addrSet:     addrSet,
-		addrSetPods: podNames,
-		podSelector: selector,
+		priority:      priority,
+		dscp:          raw.DSCP,
+		destination:   raw.DstCIDR,
+		addrSet:       addrSet,
+		podsInAddrSet: &podNames,
+		podSelector:   selector,
 	}
 
 	return eqr, nil
@@ -491,8 +491,10 @@ func (oc *Controller) cleanEgressQoSNS(namespace string) error {
 		return fmt.Errorf("failed to remove egress qos address sets, err: %v", err)
 	}
 
-	// we can delete the object from the cache now
+	// we can delete the object from the cache now.
+	// we also mark it as stale to prevent pod processing if RLock acquired after removal from cache.
 	oc.egressQoSCache.Delete(namespace)
+	eq.stale = true
 
 	return nil
 }
@@ -631,7 +633,7 @@ const (
 )
 
 type setAndOp struct {
-	set sets.String
+	set *sync.Map
 	op  setOp
 }
 
@@ -649,8 +651,11 @@ func (oc *Controller) syncEgressQoSPod(key string) error {
 	}
 
 	eq := obj.(*egressQos)
-	eq.Lock()
-	defer eq.Unlock()
+	eq.RLock() // allow multiple pods to sync
+	defer eq.RUnlock()
+	if eq.stale { // was deleted from cache while we tried to read it, already processed
+		return nil
+	}
 
 	defer func() {
 		klog.V(4).Infof("Finished syncing EgressQoS pod %s on namespace %s : %v", name, namespace, time.Since(startTime))
@@ -690,23 +695,24 @@ func (oc *Controller) syncEgressQoSPod(key string) error {
 			continue
 		}
 
-		if r.podSelector.Matches(podLabels) && !r.addrSetPods.Has(pod.Name) {
+		_, loaded := r.podsInAddrSet.Load(pod.Name)
+		if r.podSelector.Matches(podLabels) && !loaded {
 			ops, err := r.addrSet.AddIPsReturnOps(podIps)
 			if err != nil {
 				return err
 			}
 			allOps = append(allOps, ops...)
-			podSetops = append(podSetops, setAndOp{r.addrSetPods, setInsert})
+			podSetops = append(podSetops, setAndOp{r.podsInAddrSet, setInsert})
 			continue
 		}
 
-		if !r.podSelector.Matches(podLabels) && r.addrSetPods.Has(pod.Name) {
+		if !r.podSelector.Matches(podLabels) && loaded {
 			ops, err := r.addrSet.DeleteIPsReturnOps(podIps)
 			if err != nil {
 				return err
 			}
 			allOps = append(allOps, ops...)
-			podSetops = append(podSetops, setAndOp{r.addrSetPods, setDelete})
+			podSetops = append(podSetops, setAndOp{r.podsInAddrSet, setDelete})
 		}
 	}
 
@@ -718,7 +724,7 @@ func (oc *Controller) syncEgressQoSPod(key string) error {
 	for _, setOp := range podSetops {
 		switch setOp.op {
 		case setInsert:
-			setOp.set.Insert(pod.Name)
+			setOp.set.Store(pod.Name, "")
 		case setDelete:
 			setOp.set.Delete(pod.Name)
 		}
@@ -797,18 +803,19 @@ func (oc *Controller) deleteEgressQoSPod(name, namespace string, ips []net.IP) (
 	}
 
 	eq := obj.(*egressQos)
-	eq.Lock()
-	defer eq.Unlock()
+	eq.RLock() // allow multiple pods to delete
+	defer eq.RUnlock()
+	if eq.stale { // was deleted from cache while we tried to read it, already cleaned
+		return allOps, nil
+	}
 
 	for _, rule := range eq.rules {
-		if rule.addrSetPods.Has(name) {
-			rule.addrSetPods.Delete(name)
-			ops, err := rule.addrSet.DeleteIPsReturnOps(ips)
-			if err != nil {
-				return nil, err
-			}
-			allOps = append(allOps, ops...)
+		rule.podsInAddrSet.Delete(name)
+		ops, err := rule.addrSet.DeleteIPsReturnOps(ips)
+		if err != nil {
+			return nil, err
 		}
+		allOps = append(allOps, ops...)
 	}
 
 	return allOps, nil
