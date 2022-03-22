@@ -646,7 +646,7 @@ var _ = ginkgo.Describe("OVN EgressQoS Operations for shared gateway mode", func
 
 func (o *FakeOVN) InitAndRunEgressQoSController() {
 	klog.Warningf("#### [%p] INIT EgressQoS", o)
-	o.controller.initEgressQoSController(o.watcher.EgressQoSInformer(), o.watcher.WIPPodInformer())
+	o.controller.initEgressQoSController(o.watcher.EgressQoSInformer(), o.watcher.WIPPodInformer(), o.watcher.WIPNodeInformer())
 	go func() {
 		o.controller.runEgressQoSController(1, o.stopChan)
 	}()

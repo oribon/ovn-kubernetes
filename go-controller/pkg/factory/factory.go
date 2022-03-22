@@ -639,6 +639,11 @@ func (wf *WatchFactory) NodeInformer() cache.SharedIndexInformer {
 	return wf.informers[nodeType].inf
 }
 
+// TODO/WIP: should be obsoleted when node controller moves to level-driven
+func (wf *WatchFactory) WIPNodeInformer() v1coreinformers.NodeInformer {
+	return wf.iFactory.Core().V1().Nodes()
+}
+
 // LocalPodInformer returns a shared Informer that may or may not only
 // return pods running on the local node.
 func (wf *WatchFactory) LocalPodInformer() cache.SharedIndexInformer {
@@ -649,7 +654,7 @@ func (wf *WatchFactory) PodInformer() cache.SharedIndexInformer {
 	return wf.informers[podType].inf
 }
 
-// TODO: WIP: SHOULD BE REMOVED/REPLACED BY
+// TODO/WIP: should be obsoleted when pod controller moves to level-driven
 func (wf *WatchFactory) WIPPodInformer() v1coreinformers.PodInformer {
 	return wf.iFactory.Core().V1().Pods()
 }

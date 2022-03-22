@@ -141,7 +141,8 @@ func (oc *Controller) cloneEgressQoSRule(raw egressqosapi.EgressQoSRule, namespa
 // initEgressQoSController initializes the EgressQoS controller.
 func (oc *Controller) initEgressQoSController(
 	eqInformer egressqosinformer.EgressQoSInformer,
-	podInformer v1coreinformers.PodInformer) {
+	podInformer v1coreinformers.PodInformer,
+	nodeInformer v1coreinformers.NodeInformer) {
 	klog.Info("Setting up event handlers for EgressQoS")
 	oc.egressQoSLister = eqInformer.Lister()
 	oc.egressQoSSynced = eqInformer.Informer().HasSynced
@@ -166,6 +167,97 @@ func (oc *Controller) initEgressQoSController(
 		UpdateFunc: oc.onEgressQoSPodUpdate,
 		DeleteFunc: func(obj interface{}) {}, // Deletes are handled in deleteLogicalPort
 	})
+
+	oc.egressQoSNodeLister = nodeInformer.Lister()
+	oc.egressQoSNodeSynced = nodeInformer.Informer().HasSynced
+	oc.egressQoSNodeQueue = workqueue.NewNamedRateLimitingQueue(
+		workqueue.NewItemFastSlowRateLimiter(1*time.Second, 5*time.Second, 5),
+		"egressqosnodes",
+	)
+	nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    oc.onEgressQoSNodeAdd,
+		UpdateFunc: func(o, n interface{}) {}, // Updates/Deletes do not matter to us
+		DeleteFunc: func(obj interface{}) {},
+	})
+}
+
+func (oc *Controller) runEgressQoSController(threadiness int, stopCh <-chan struct{}) {
+	// don't let panics crash the process
+	defer utilruntime.HandleCrash()
+
+	klog.Infof("Starting EgressQoS Controller")
+
+	// wait for your caches to fill before starting your work
+	if !cache.WaitForNamedCacheSync("egressqosnodes", stopCh, oc.egressQoSNodeSynced) {
+		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		klog.Infof("Synchronization failed")
+		return
+	}
+
+	if !cache.WaitForNamedCacheSync("egressqospods", stopCh, oc.egressQoSPodSynced) {
+		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		klog.Infof("Synchronization failed")
+		return
+	}
+
+	if !cache.WaitForNamedCacheSync("egressqos", stopCh, oc.egressQoSSynced) {
+		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		klog.Infof("Synchronization failed")
+		return
+	}
+
+	// run the repair controller
+	klog.Infof("Repairing EgressQoSes")
+	err := oc.repairEgressQoSes()
+	if err != nil {
+		klog.Errorf("failed to delete stale EgressQoS entries: %v", err)
+	}
+
+	// start up your worker threads based on threadiness.  Some controllers
+	// have multiple kinds of workers
+	wg := &sync.WaitGroup{}
+	for i := 0; i < threadiness; i++ {
+		wg.Add(1)
+		// runEgressQoSWorker will loop until "something bad" happens.  The .Until will
+		// then rekick the worker after one second
+		go func() {
+			defer wg.Done()
+			wait.Until(func() {
+				oc.runEgressQoSWorker(wg)
+			}, time.Second, stopCh)
+		}()
+	}
+
+	for i := 0; i < threadiness; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			wait.Until(func() {
+				oc.runEgressQoSPodWorker(wg)
+			}, time.Second, stopCh)
+		}()
+	}
+
+	for i := 0; i < threadiness; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			wait.Until(func() {
+				oc.runEgressQoSNodeWorker(wg)
+			}, time.Second, stopCh)
+		}()
+	}
+
+	// wait until we're told to stop
+	<-stopCh
+
+	klog.Infof("Shutting down EgressQoS controller")
+	// make sure the work queue is shutdown which will trigger workers to end
+	oc.egressQoSQueue.ShutDown()
+	oc.egressQoSPodQueue.ShutDown()
+	oc.egressQoSNodeQueue.ShutDown()
+	// wait for workers to finish
+	wg.Wait()
 }
 
 // onEgressQoSAdd queues the EgressQoS for processing.
@@ -205,68 +297,6 @@ func (oc *Controller) onEgressQoSDelete(obj interface{}) {
 	}
 	klog.V(4).Infof("Deleting EgressQoS %s", key)
 	oc.egressQoSQueue.Add(key)
-}
-
-func (oc *Controller) runEgressQoSController(threadiness int, stopCh <-chan struct{}) {
-	// don't let panics crash the process
-	defer utilruntime.HandleCrash()
-
-	klog.Infof("Starting EgressQoS Controller")
-
-	// wait for your caches to fill before starting your work
-	if !cache.WaitForCacheSync(stopCh, oc.egressQoSSynced) {
-		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
-		klog.Infof("Synchronization failed")
-		return
-	}
-
-	if !cache.WaitForCacheSync(stopCh, oc.egressQoSPodSynced) {
-		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
-		klog.Infof("Synchronization failed")
-		return
-	}
-
-	// run the repair controller
-	klog.Infof("Repairing EgressQoSes")
-	err := oc.repairEgressQoSes()
-	if err != nil {
-		klog.Errorf("failed to delete stale EgressQoS entries: %v", err)
-	}
-
-	// start up your worker threads based on threadiness.  Some controllers
-	// have multiple kinds of workers
-	wg := &sync.WaitGroup{}
-	for i := 0; i < threadiness; i++ {
-		wg.Add(1)
-		// runEgressQoSWorker will loop until "something bad" happens.  The .Until will
-		// then rekick the worker after one second
-		go func() {
-			defer wg.Done()
-			wait.Until(func() {
-				oc.runEgressQoSWorker(wg)
-			}, time.Second, stopCh)
-		}()
-	}
-
-	for i := 0; i < threadiness; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			wait.Until(func() {
-				oc.runEgressQoSPodWorker(wg)
-			}, time.Second, stopCh)
-		}()
-	}
-
-	// wait until we're told to stop
-	<-stopCh
-
-	klog.Infof("Shutting down EgressQoS controller")
-	// make sure the work queue is shutdown which will trigger workers to end
-	oc.egressQoSQueue.ShutDown()
-	oc.egressQoSPodQueue.ShutDown()
-	// wait for workers to finish
-	wg.Wait()
 }
 
 func (oc *Controller) runEgressQoSWorker(wg *sync.WaitGroup) {
@@ -327,6 +357,12 @@ func (oc *Controller) processNextEgressQoSWorkItem(wg *sync.WaitGroup) bool {
 // there's no ovnkube-master running for a while.
 // It deletes all QoSes and Address Sets from OVN that belong to EgressQoSes.
 func (oc *Controller) repairEgressQoSes() error {
+	startTime := time.Now()
+	klog.V(4).Infof("Starting repairing loop for egressqos")
+	defer func() {
+		klog.V(4).Infof("Finished repairing loop for egressqos: %v", time.Since(startTime))
+	}()
+
 	qosRes := []nbdb.QoS{}
 	logicalSwitches, err := oc.egressQoSSwitches()
 	if err != nil {
@@ -359,6 +395,7 @@ func (oc *Controller) repairEgressQoSes() error {
 			OnModelMutations: []interface{}{
 				&sw.QOSRules,
 			},
+			ErrNotFound: true,
 		})
 	}
 
@@ -419,14 +456,14 @@ func (oc *Controller) syncEgressQoS(key string) error {
 
 	klog.V(5).Infof("EgressQoS %s retrieved from lister: %v", eq.Name, eq)
 
-	return oc.addEgressQoSNS(eq)
+	return oc.addEgressQoS(eq)
 }
 
 func (oc *Controller) cleanEgressQoSNS(namespace string) error {
 	obj, loaded := oc.egressQoSCache.Load(namespace)
 	if !loaded {
 		// the namespace is clean
-		klog.Infof("EgressQos for namespace %s not found in cache", namespace)
+		klog.V(4).Infof("EgressQoS for namespace %s not found in cache", namespace)
 		return nil
 	}
 
@@ -470,6 +507,7 @@ func (oc *Controller) cleanEgressQoSNS(namespace string) error {
 			OnModelMutations: []interface{}{
 				&sw.QOSRules,
 			},
+			ErrNotFound: true,
 		})
 	}
 
@@ -499,7 +537,7 @@ func (oc *Controller) cleanEgressQoSNS(namespace string) error {
 	return nil
 }
 
-func (oc *Controller) addEgressQoSNS(eqObj *egressqosapi.EgressQoS) error {
+func (oc *Controller) addEgressQoS(eqObj *egressqosapi.EgressQoS) error {
 	eq, err := oc.cloneEgressQoS(eqObj)
 	if err != nil {
 		return err
@@ -516,16 +554,6 @@ func (oc *Controller) addEgressQoSNS(eqObj *egressqosapi.EgressQoS) error {
 	eq.Lock()
 	defer eq.Unlock()
 
-	err = oc.createEgressQoS(eq)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// Creates the necessary OVN QoS objects for an EgressQoS
-func (oc *Controller) createEgressQoS(eq *egressQos) error {
 	logicalSwitches, err := oc.egressQoSSwitches()
 	if err != nil {
 		return err
@@ -604,8 +632,8 @@ func generateEgressQoSMatch(eq *egressQosRule, hashedAddressSetNameIPv4, hashedA
 }
 
 func (oc *Controller) egressQoSSwitches() ([]*nbdb.LogicalSwitch, error) {
-	logicalSwitches := []*nbdb.LogicalSwitch{}
 	if config.Gateway.Mode == config.GatewayModeLocal {
+		logicalSwitches := []*nbdb.LogicalSwitch{}
 		nodeLocalSwitches, err := libovsdbops.FindAllNodeLocalSwitches(oc.nbClient)
 		if err != nil {
 			return nil, fmt.Errorf("unable to fetch local switches for EgressQoS, err: %v", err)
@@ -617,12 +645,12 @@ func (oc *Controller) egressQoSSwitches() ([]*nbdb.LogicalSwitch, error) {
 		return logicalSwitches, nil
 	}
 
-	joinSw := &nbdb.LogicalSwitch{
-		Name: types.OVNJoinSwitch,
+	joinSw, err := libovsdbops.FindSwitchByName(oc.nbClient, types.OVNJoinSwitch)
+	if err != nil {
+		return nil, err
 	}
-	logicalSwitches = append(logicalSwitches, joinSw)
 
-	return logicalSwitches, nil
+	return []*nbdb.LogicalSwitch{joinSw}, nil
 }
 
 type setOp int
@@ -645,6 +673,11 @@ func (oc *Controller) syncEgressQoSPod(key string) error {
 	}
 
 	klog.Infof("Processing sync for EgressQoS pod %s/%s", namespace, name)
+
+	defer func() {
+		klog.V(4).Infof("Finished syncing EgressQoS pod %s on namespace %s : %v", name, namespace, time.Since(startTime))
+	}()
+
 	obj, loaded := oc.egressQoSCache.Load(namespace)
 	if !loaded { // no EgressQoS in the namespace
 		return nil
@@ -656,10 +689,6 @@ func (oc *Controller) syncEgressQoSPod(key string) error {
 	if eq.stale { // was deleted from cache while we tried to read it, already processed
 		return nil
 	}
-
-	defer func() {
-		klog.V(4).Infof("Finished syncing EgressQoS pod %s on namespace %s : %v", name, namespace, time.Since(startTime))
-	}()
 
 	// Get current Pod from the cache
 	pod, err := oc.egressQoSPodLister.Pods(namespace).Get(name)
@@ -740,7 +769,7 @@ func (oc *Controller) onEgressQoSPodAdd(obj interface{}) {
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
 		return
 	}
-	klog.V(4).Infof("Adding EgressQoS Pod %s", key)
+	klog.V(4).Infof("Adding EgressQoS pod %s", key)
 	oc.egressQoSPodQueue.Add(key)
 }
 
@@ -819,4 +848,110 @@ func (oc *Controller) deleteEgressQoSPod(name, namespace string, ips []net.IP) (
 	}
 
 	return allOps, nil
+}
+
+// onEgressQoSAdd queues the node for processing.
+func (oc *Controller) onEgressQoSNodeAdd(obj interface{}) {
+	key, err := cache.MetaNamespaceKeyFunc(obj)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
+		return
+	}
+	klog.V(4).Infof("Adding EgressQoS node %s", key)
+	oc.egressQoSNodeQueue.Add(key)
+}
+
+func (oc *Controller) runEgressQoSNodeWorker(wg *sync.WaitGroup) {
+	for oc.processNextEgressQoSNodeWorkItem(wg) {
+	}
+}
+
+func (oc *Controller) processNextEgressQoSNodeWorkItem(wg *sync.WaitGroup) bool {
+	wg.Add(1)
+	defer wg.Done()
+	key, quit := oc.egressQoSNodeQueue.Get()
+	if quit {
+		return false
+	}
+	defer oc.egressQoSNodeQueue.Done(key)
+
+	err := oc.syncEgressQoSNode(key.(string))
+	if err == nil {
+		oc.egressQoSNodeQueue.Forget(key)
+		return true
+	}
+
+	utilruntime.HandleError(fmt.Errorf("%v failed with : %v", key, err))
+
+	if oc.egressQoSNodeQueue.NumRequeues(key) < maxEgressQoSRetries {
+		oc.egressQoSNodeQueue.AddRateLimited(key)
+		return true
+	}
+
+	oc.egressQoSNodeQueue.Forget(key)
+	return true
+}
+
+func (oc *Controller) syncEgressQoSNode(key string) error {
+	startTime := time.Now()
+	_, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return err
+	}
+	klog.Infof("Processing sync for EgressQoS node %s", name)
+
+	defer func() {
+		klog.V(4).Infof("Finished syncing EgressQoS node %s : %v", name, time.Since(startTime))
+	}()
+
+	if config.Gateway.Mode == config.GatewayModeShared {
+		return nil // in SGW we add the QoSes to the join switch
+	}
+
+	n, err := oc.egressQoSNodeLister.Get(name)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	if n == nil { // we don't process node deletion
+		return nil
+	}
+
+	klog.V(5).Infof("EgressQoS %s node retrieved from lister: %v", n.Name, n)
+
+	nodeSw, err := libovsdbops.FindSwitchByName(oc.nbClient, n.Name)
+	if err != nil {
+		return err
+	}
+
+	qosRes := []nbdb.QoS{}
+	opModels := []libovsdbops.OperationModel{
+		{
+			ModelPredicate: func(q *nbdb.QoS) bool {
+				_, ok := q.ExternalIDs["EgressQoS"]
+				return ok // determines if the QoS is managed by an EgressQoS
+			},
+			ExistingResult: &qosRes,
+			DoAfter: func() {
+				uuids := libovsdbops.ExtractUUIDsFromModels(&qosRes)
+				nodeSw.QOSRules = uuids
+			},
+			BulkOp: true,
+		},
+		{
+			Name:           nodeSw.Name,
+			Model:          nodeSw,
+			ModelPredicate: func(ls *nbdb.LogicalSwitch) bool { return ls.Name == nodeSw.Name },
+			OnModelMutations: []interface{}{
+				&nodeSw.QOSRules,
+			},
+			ErrNotFound: true,
+		},
+	}
+
+	if _, err := oc.modelClient.CreateOrUpdate(opModels...); err != nil {
+		return fmt.Errorf("unable to add existing qoses to new node, err: %v", err)
+	}
+
+	return nil
 }

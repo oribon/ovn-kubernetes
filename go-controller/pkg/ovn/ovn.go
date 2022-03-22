@@ -149,6 +149,10 @@ type Controller struct {
 	egressQoSPodSynced cache.InformerSynced
 	egressQoSPodQueue  workqueue.RateLimitingInterface
 
+	egressQoSNodeLister corev1listers.NodeLister
+	egressQoSNodeSynced cache.InformerSynced
+	egressQoSNodeQueue  workqueue.RateLimitingInterface
+
 	// An address set factory that creates address sets
 	addressSetFactory addressset.AddressSetFactory
 
@@ -398,7 +402,10 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 	}
 
 	if config.OVNKubernetesFeature.EnableEgressQoS {
-		oc.initEgressQoSController(oc.watchFactory.EgressQoSInformer(), oc.watchFactory.WIPPodInformer())
+		oc.initEgressQoSController(
+			oc.watchFactory.EgressQoSInformer(),
+			oc.watchFactory.WIPPodInformer(),
+			oc.watchFactory.WIPNodeInformer())
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
