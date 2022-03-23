@@ -176,18 +176,16 @@ func (oc *Controller) initEgressQoSController(
 	)
 	nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    oc.onEgressQoSNodeAdd,
-		UpdateFunc: func(o, n interface{}) {}, // Updates/Deletes do not matter to us
-		DeleteFunc: func(obj interface{}) {},
+		UpdateFunc: func(o, n interface{}) {}, // Updates/Deletes do not matter here as
+		DeleteFunc: func(obj interface{}) {},  // the node's ls will be deleted
 	})
 }
 
 func (oc *Controller) runEgressQoSController(threadiness int, stopCh <-chan struct{}) {
-	// don't let panics crash the process
 	defer utilruntime.HandleCrash()
 
 	klog.Infof("Starting EgressQoS Controller")
 
-	// wait for your caches to fill before starting your work
 	if !cache.WaitForNamedCacheSync("egressqosnodes", stopCh, oc.egressQoSNodeSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		klog.Infof("Synchronization failed")
@@ -206,20 +204,15 @@ func (oc *Controller) runEgressQoSController(threadiness int, stopCh <-chan stru
 		return
 	}
 
-	// run the repair controller
 	klog.Infof("Repairing EgressQoSes")
 	err := oc.repairEgressQoSes()
 	if err != nil {
-		klog.Errorf("failed to delete stale EgressQoS entries: %v", err)
+		klog.Errorf("Failed to delete stale EgressQoS entries: %v", err)
 	}
 
-	// start up your worker threads based on threadiness.  Some controllers
-	// have multiple kinds of workers
 	wg := &sync.WaitGroup{}
 	for i := 0; i < threadiness; i++ {
 		wg.Add(1)
-		// runEgressQoSWorker will loop until "something bad" happens.  The .Until will
-		// then rekick the worker after one second
 		go func() {
 			defer wg.Done()
 			wait.Until(func() {
@@ -252,11 +245,10 @@ func (oc *Controller) runEgressQoSController(threadiness int, stopCh <-chan stru
 	<-stopCh
 
 	klog.Infof("Shutting down EgressQoS controller")
-	// make sure the work queue is shutdown which will trigger workers to end
 	oc.egressQoSQueue.ShutDown()
 	oc.egressQoSPodQueue.ShutDown()
 	oc.egressQoSNodeQueue.ShutDown()
-	// wait for workers to finish
+
 	wg.Wait()
 }
 
@@ -276,7 +268,6 @@ func (oc *Controller) onEgressQoSUpdate(oldObj, newObj interface{}) {
 	oldEQ := oldObj.(*egressqosapi.EgressQoS)
 	newEQ := newObj.(*egressqosapi.EgressQoS)
 
-	// don't process resync on objects that are marked for deletion
 	if oldEQ.ResourceVersion == newEQ.ResourceVersion ||
 		!newEQ.GetDeletionTimestamp().IsZero() {
 		return
@@ -300,55 +291,34 @@ func (oc *Controller) onEgressQoSDelete(obj interface{}) {
 }
 
 func (oc *Controller) runEgressQoSWorker(wg *sync.WaitGroup) {
-	// hot loop until we're told to stop.  processNextWorkItem will
-	// automatically wait until there's work available, so we don't worry
-	// about secondary waits
 	for oc.processNextEgressQoSWorkItem(wg) {
 	}
 }
 
-// processNextEgressQoSWorkItem deals with one key off the queue.  It returns false
-// when it's time to quit.
 func (oc *Controller) processNextEgressQoSWorkItem(wg *sync.WaitGroup) bool {
 	wg.Add(1)
 	defer wg.Done()
-	// pull the next work item from queue.  It should be a key we use to lookup
-	// something in a cache
+
 	key, quit := oc.egressQoSQueue.Get()
 	if quit {
 		return false
 	}
-	// you always have to indicate to the queue that you've completed a piece of
-	// work
+
 	defer oc.egressQoSQueue.Done(key)
 
-	// do your work on the key.  This method will contain your "do stuff" logic
 	err := oc.syncEgressQoS(key.(string))
 	if err == nil {
-		// if you had no error, tell the queue to stop tracking history for your
-		// key. This will reset things like failure counts for per-item rate
-		// limiting
 		oc.egressQoSQueue.Forget(key)
 		return true
 	}
 
-	// there was a failure so be sure to report it.  This method allows for
-	// pluggable error handling which can be used for things like
-	// cluster-monitoring
 	utilruntime.HandleError(fmt.Errorf("%v failed with : %v", key, err))
 
-	// since we failed, we should requeue the item to work on later.
-	// but only if we've not exceeded max retries. This method
-	// will add a backoff to avoid hotlooping on particular items
-	// (they're probably still not going to work right away) and overall
-	// controller protection (everything I've done is broken, this controller
-	// needs to calm down or it can starve other useful work) cases.
 	if oc.egressQoSQueue.NumRequeues(key) < maxEgressQoSRetries {
 		oc.egressQoSQueue.AddRateLimited(key)
 		return true
 	}
 
-	// if we've exceeded MaxRetries, remove the item from the queue
 	oc.egressQoSQueue.Forget(key)
 	return true
 }
@@ -432,17 +402,14 @@ func (oc *Controller) syncEgressQoS(key string) error {
 		klog.V(4).Infof("Finished syncing EgressQoS %s on namespace %s : %v", name, namespace, time.Since(startTime))
 	}()
 
-	// Get current EgressQoS from the cache
 	eq, err := oc.egressQoSLister.EgressQoSes(namespace).Get(name)
-	// It´s unlikely that we have an error different that "Not Found Object"
-	// because we are getting the object from the informer´s cache
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 
 	if name != defaultEgressQosName {
 		klog.Errorf("EgressQoS name %s is invalid, must be %s", name, defaultEgressQosName)
-		return nil // Return nil to avoid requeue
+		return nil // Return nil to avoid requeues
 	}
 
 	err = oc.cleanEgressQoSNS(namespace)
@@ -530,7 +497,8 @@ func (oc *Controller) cleanEgressQoSNS(namespace string) error {
 	}
 
 	// we can delete the object from the cache now.
-	// we also mark it as stale to prevent pod processing if RLock acquired after removal from cache.
+	// we also mark it as stale to prevent pod processing if RLock
+	// acquired after removal from cache.
 	oc.egressQoSCache.Delete(namespace)
 	eq.stale = true
 
@@ -690,10 +658,7 @@ func (oc *Controller) syncEgressQoSPod(key string) error {
 		return nil
 	}
 
-	// Get current Pod from the cache
 	pod, err := oc.egressQoSPodLister.Pods(namespace).Get(name)
-	// It´s unlikely that we have an error different that "Not Found Object"
-	// because we are getting the object from the informer´s cache
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -778,7 +743,6 @@ func (oc *Controller) onEgressQoSPodUpdate(oldObj, newObj interface{}) {
 	oldPod := oldObj.(*kapi.Pod)
 	newPod := newObj.(*kapi.Pod)
 
-	// don't process resync on objects that are marked for deletion
 	if oldPod.ResourceVersion == newPod.ResourceVersion ||
 		!newPod.GetDeletionTimestamp().IsZero() {
 		return
@@ -913,7 +877,7 @@ func (oc *Controller) syncEgressQoSNode(key string) error {
 		return err
 	}
 
-	if n == nil { // we don't process node deletion
+	if n == nil { // we don't process node deletions, its logical switch will be deleted.
 		return nil
 	}
 

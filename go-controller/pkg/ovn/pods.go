@@ -178,10 +178,9 @@ func (oc *Controller) deleteLogicalPort(pod *kapi.Pod, portInfo *lpInfo) (err er
 
 	ops, err = oc.deleteEgressQoSPod(pod.Name, pod.Namespace, createIPAddressSlice(portInfo.ips))
 	if err != nil {
-		klog.Errorf(err.Error())
-	} else {
-		allOps = append(allOps, ops...)
+		return fmt.Errorf("failed to create delete ops for egressqos pod: %s: %s", podDesc, err)
 	}
+	allOps = append(allOps, ops...)
 
 	_, err = libovsdbops.TransactAndCheck(oc.nbClient, allOps)
 	if err != nil {
