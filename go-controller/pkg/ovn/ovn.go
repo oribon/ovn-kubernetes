@@ -18,6 +18,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
 	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	egresssvc "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egress_services"
 	svccontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
 	corev1listers "k8s.io/client-go/listers/core/v1"
@@ -174,6 +175,8 @@ type Controller struct {
 
 	// Controller used to handle services
 	svcController *svccontroller.Controller
+	// Controller used to handle egress services
+	egressSvcController *egresssvc.Controller
 	// svcFactory used to handle service related events
 	svcFactory informers.SharedInformerFactory
 
@@ -270,6 +273,9 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 		addressSetFactory = addressset.NewOvnAddressSetFactory(libovsdbOvnNBClient)
 	}
 	svcController, svcFactory := newServiceController(ovnClient.KubeClient, libovsdbOvnNBClient, recorder)
+	egressSvcController := egresssvc.NewController(ovnClient.KubeClient, libovsdbOvnNBClient, svcFactory.Core().V1().Services(),
+		svcFactory.Discovery().V1().EndpointSlices(),
+		svcFactory.Core().V1().Nodes())
 	return &Controller{
 		client: ovnClient.KubeClient,
 		kube: &kube.Kube{
@@ -321,6 +327,7 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 		sbClient:                  libovsdbOvnSBClient,
 		svcController:             svcController,
 		svcFactory:                svcFactory,
+		egressSvcController:       egressSvcController,
 		podRecorder:               metrics.NewPodRecorder(),
 	}
 }
@@ -427,6 +434,12 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 			oc.runEgressQoSController(1, oc.stopChan)
 		}()
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		oc.egressSvcController.Run(1, oc.stopChan)
+	}()
 
 	klog.Infof("Completing all the Watchers took %v", time.Since(start))
 
