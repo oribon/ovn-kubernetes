@@ -47,9 +47,6 @@ func GetEgressSVCHost(svc *kapi.Service) (string, error) {
 	return host, nil
 }
 
-func EgressSVCChanged(oldSVC, newSVC *kapi.Service) bool {
-	oldCfg, oldFound := oldSVC.Annotations[EgressSVCAnnotation]
-	newCfg, newFound := newSVC.Annotations[EgressSVCAnnotation]
-	return oldCfg != newCfg || oldFound != newFound ||
-		oldSVC.Annotations[EgressSVCHostAnnotation] != newSVC.Annotations[EgressSVCHostAnnotation]
+func EgressSVCHostChanged(oldSVC, newSVC *kapi.Service) bool {
+	return oldSVC.Annotations[EgressSVCHostAnnotation] != newSVC.Annotations[EgressSVCHostAnnotation]
 }
