@@ -160,14 +160,16 @@ func (c *Controller) syncService(key string) error {
 	}
 
 	if conf != nil && !found {
-		// select node -> annotate service -> update caches, return nil ==> this will cause a reconciliation with a new cache
 		selector, _ := metav1.LabelSelectorAsSelector(&conf.NodeSelector)
+		c.unallocatedServices[key] = selector
+
 		node, err := c.selectNodeFor(selector)
 		if err != nil {
 			return err
 		}
 
-		err = c.annotateServiceWithNode(name, namespace, node.name) // causes reconcile
+		delete(c.unallocatedServices, key) // we found a node
+		err = c.annotateServiceWithNode(name, namespace, node.name)
 		if err != nil {
 			return err
 		}
@@ -177,8 +179,7 @@ func (c *Controller) syncService(key string) error {
 		c.services[key] = newState
 		node.allocations[key] = newState
 		c.nodes[node.name] = node
-
-		return nil
+		state = newState
 	}
 
 	state.selector, _ = metav1.LabelSelectorAsSelector(&conf.NodeSelector)
@@ -270,6 +271,7 @@ func (c *Controller) clearServiceResources(key string, svcState *svcState) error
 	}
 
 	delete(c.services, key)
+	delete(c.unallocatedServices, key)
 	return nil
 }
 
@@ -325,7 +327,7 @@ func (c *Controller) selectNodeFor(selector labels.Selector) (*nodeState, error)
 		}
 	}
 
-	cachedNames, cachedStates := c.cachedNodesFor(selector) // TODO: check if it reachable first (?)
+	cachedNames, cachedStates := c.cachedNodesFor(selector)
 
 	freeNodes := allNodes.Difference(cachedNames)
 	if freeNodes.Len() > 0 {
@@ -334,16 +336,18 @@ func (c *Controller) selectNodeFor(selector labels.Selector) (*nodeState, error)
 		return c.nodeStateFor(node)
 	}
 
-	if cachedNames.Len() == 0 {
-		return nil, fmt.Errorf("no nodes available")
-	}
-
 	// we need to use one of the used nodes, we will pick the one with the least amount of allocations
 	sort.Slice(cachedStates, func(i, j int) bool {
 		return len(cachedStates[i].allocations) < len(cachedStates[j].allocations)
 	})
 
-	return cachedStates[0], nil
+	for _, node := range cachedStates {
+		if !node.draining {
+			return node, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no suitable node for selector: %s", selector.String())
 }
 
 func (c *Controller) nodeStateFor(name string) (*nodeState, error) {
@@ -371,7 +375,7 @@ func (c *Controller) nodeStateFor(name string) (*nodeState, error) {
 		v6IP = ip
 	}
 
-	return &nodeState{name: name, v4MgmtIP: v4IP, v6MgmtIP: v6IP, allocations: map[string]*svcState{}, labels: node.Labels, ready: true, reachable: true, draining: false}, nil
+	return &nodeState{name: name, v4MgmtIP: v4IP, v6MgmtIP: v6IP, allocations: map[string]*svcState{}, labels: node.Labels, reachable: true, draining: false}, nil
 }
 
 func (c *Controller) cachedNodesFor(selector labels.Selector) (sets.String, []*nodeState) {

@@ -271,7 +271,7 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 		addressSetFactory = addressset.NewOvnAddressSetFactory(libovsdbOvnNBClient)
 	}
 	svcController, svcFactory := newServiceController(ovnClient.KubeClient, libovsdbOvnNBClient, recorder)
-	egressSvcController := egresssvc.NewController(ovnClient.KubeClient, libovsdbOvnNBClient, svcFactory.Core().V1().Services(),
+	egressSvcController := egresssvc.NewController(ovnClient.KubeClient, libovsdbOvnNBClient, stopChan, svcFactory.Core().V1().Services(),
 		svcFactory.Discovery().V1().EndpointSlices(),
 		svcFactory.Core().V1().Nodes())
 	var hybridOverlaySubnetAllocator *subnetallocator.SubnetAllocator
@@ -441,7 +441,7 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		oc.egressSvcController.Run(1, oc.stopChan)
+		oc.egressSvcController.Run(1)
 	}()
 
 	klog.Infof("Completing all the Watchers took %v", time.Since(start))

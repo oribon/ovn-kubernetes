@@ -28,6 +28,7 @@ const (
 type Controller struct {
 	client   kubernetes.Interface
 	nbClient libovsdbclient.Client
+	stopCh   <-chan struct{}
 	sync.Mutex
 
 	/* revisit, reuse types.DefaultNoRereoutePriority functions for egressip
@@ -36,8 +37,9 @@ type Controller struct {
 	v4ClusterSubnets []*net.IPNet //getClusterSubnets in eip controller / egressfw controller
 	v6ClusterSubnets []*net.IPNet*/
 
-	services map[string]*svcState
-	nodes    map[string]*nodeState
+	services            map[string]*svcState
+	nodes               map[string]*nodeState
+	unallocatedServices map[string]labels.Selector
 
 	serviceLister  corelisters.ServiceLister
 	servicesSynced cache.InformerSynced
@@ -65,23 +67,26 @@ type nodeState struct {
 	v4MgmtIP    net.IP
 	v6MgmtIP    net.IP
 	allocations map[string]*svcState
-	ready       bool
-	reachable   bool
-	draining    bool
+	//ready       bool
+	reachable bool
+	draining  bool
 }
 
 func NewController(
 	client kubernetes.Interface,
 	nbClient libovsdbclient.Client,
+	stopCh <-chan struct{},
 	serviceInformer coreinformers.ServiceInformer,
 	endpointSliceInformer discoveryinformers.EndpointSliceInformer,
 	nodeInformer coreinformers.NodeInformer) *Controller {
 	klog.Info("Setting up event handlers for Egress Services")
 	c := &Controller{
-		client:   client,
-		nbClient: nbClient,
-		services: map[string]*svcState{},
-		nodes:    map[string]*nodeState{},
+		client:              client,
+		nbClient:            nbClient,
+		stopCh:              stopCh,
+		services:            map[string]*svcState{},
+		nodes:               map[string]*nodeState{},
+		unallocatedServices: map[string]labels.Selector{},
 	}
 
 	c.serviceLister = serviceInformer.Lister()
@@ -120,24 +125,24 @@ func NewController(
 	// update clustersubnets?
 }
 
-func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) {
+func (c *Controller) Run(threadiness int) {
 	defer utilruntime.HandleCrash()
 
 	klog.Infof("Starting Egress Services Controller")
 
-	if !cache.WaitForNamedCacheSync("egressservices", stopCh, c.servicesSynced) {
+	if !cache.WaitForNamedCacheSync("egressservices", c.stopCh, c.servicesSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		klog.Infof("Synchronization failed")
 		return
 	}
 
-	if !cache.WaitForNamedCacheSync("egressserviceendpointslices", stopCh, c.endpointSlicesSynced) {
+	if !cache.WaitForNamedCacheSync("egressserviceendpointslices", c.stopCh, c.endpointSlicesSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		klog.Infof("Synchronization failed")
 		return
 	}
 
-	if !cache.WaitForNamedCacheSync("egressservicenodes", stopCh, c.nodesSynced) {
+	if !cache.WaitForNamedCacheSync("egressservicenodes", c.stopCh, c.nodesSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		klog.Infof("Synchronization failed")
 		return
@@ -156,7 +161,7 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) {
 			defer wg.Done()
 			wait.Until(func() {
 				c.runServiceWorker(wg)
-			}, time.Second, stopCh)
+			}, time.Second, c.stopCh)
 		}()
 	}
 
@@ -166,12 +171,14 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) {
 			defer wg.Done()
 			wait.Until(func() {
 				c.runNodeWorker(wg)
-			}, time.Second, stopCh)
+			}, time.Second, c.stopCh)
 		}()
 	}
 
+	go c.checkNodesReachability()
+
 	// wait until we're told to stop
-	<-stopCh
+	<-c.stopCh
 
 	klog.Infof("Shutting down Egress Services controller")
 	c.servicesQueue.ShutDown()
