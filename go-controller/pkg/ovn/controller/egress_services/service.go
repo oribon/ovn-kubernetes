@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"sort"
 	"sync"
 	"time"
@@ -135,6 +134,7 @@ func (c *Controller) syncService(key string) error {
 
 	state, found := c.services[key]
 	if svc == nil && !found {
+		delete(c.unallocatedServices, key) // just in case
 		return nil
 	}
 
@@ -168,12 +168,12 @@ func (c *Controller) syncService(key string) error {
 			return err
 		}
 
-		delete(c.unallocatedServices, key) // we found a node
 		err = c.annotateServiceWithNode(name, namespace, node.name)
 		if err != nil {
 			return err
 		}
 
+		delete(c.unallocatedServices, key) // we found a node
 		// updating caches
 		newState := &svcState{node: node.name, selector: selector, v4Endpoints: sets.NewString(), v6Endpoints: sets.NewString(), stale: false}
 		c.services[key] = newState
@@ -212,7 +212,7 @@ func (c *Controller) syncService(key string) error {
 	v6ToRemove := state.v6Endpoints.Difference(v6Endpoints)
 
 	allOps := []libovsdb.Operation{}
-	createOps, err := c.createLogicalRouterPoliciesOps(key, node.v4MgmtIP.String(), node.v6MgmtIP.String(), v4ToAdd, v6ToAdd)
+	createOps, err := c.createLogicalRouterPoliciesOps(key, node.v4MgmtIP.String(), node.v6MgmtIP.String(), v4ToAdd.UnsortedList(), v6ToAdd.UnsortedList())
 	if err != nil {
 		return err
 	}
@@ -350,47 +350,6 @@ func (c *Controller) selectNodeFor(selector labels.Selector) (*nodeState, error)
 	return nil, fmt.Errorf("no suitable node for selector: %s", selector.String())
 }
 
-func (c *Controller) nodeStateFor(name string) (*nodeState, error) {
-	node, err := c.nodeLister.Get(name)
-	if err != nil {
-		return nil, err
-	}
-
-	nodeSubnets, err := util.ParseNodeHostSubnetAnnotation(node)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse node %s subnets annotation %v", node.Name, err)
-	}
-
-	mgmtIPs := make([]net.IP, len(nodeSubnets))
-	for i, subnet := range nodeSubnets {
-		mgmtIPs[i] = util.GetNodeManagementIfAddr(subnet).IP
-	}
-
-	var v4IP, v6IP net.IP
-	for _, ip := range mgmtIPs {
-		if utilnet.IsIPv4(ip) {
-			v4IP = ip
-			continue
-		}
-		v6IP = ip
-	}
-
-	return &nodeState{name: name, v4MgmtIP: v4IP, v6MgmtIP: v6IP, allocations: map[string]*svcState{}, labels: node.Labels, reachable: true, draining: false}, nil
-}
-
-func (c *Controller) cachedNodesFor(selector labels.Selector) (sets.String, []*nodeState) {
-	names := sets.NewString()
-	states := []*nodeState{}
-	for _, n := range c.nodes {
-		if selector.Matches(labels.Set(n.labels)) {
-			names.Insert(n.name)
-			states = append(states, n)
-		}
-	}
-
-	return names, states
-}
-
 func (c *Controller) allEndpointsFor(svc *corev1.Service) (sets.String, sets.String, error) {
 	// Get the endpoint slices associated to the Service
 	esLabelSelector := labels.Set(map[string]string{
@@ -419,11 +378,11 @@ func (c *Controller) allEndpointsFor(svc *corev1.Service) (sets.String, sets.Str
 	return v4Endpoints, v6Endpoints, nil
 }
 
-func (c *Controller) createLogicalRouterPoliciesOps(key, v4MgmtIP, v6MgmtIP string, v4Endpoints, v6Endpoints sets.String) ([]libovsdb.Operation, error) {
+func (c *Controller) createLogicalRouterPoliciesOps(key, v4MgmtIP, v6MgmtIP string, v4Endpoints, v6Endpoints []string) ([]libovsdb.Operation, error) {
 	allOps := []libovsdb.Operation{}
 	var err error
 
-	for _, addr := range v4Endpoints.UnsortedList() {
+	for _, addr := range v4Endpoints {
 		lrp := &nbdb.LogicalRouterPolicy{
 			Match:    fmt.Sprintf("ip4.src == %s", addr),
 			Priority: ovntypes.EgressSVCReroutePriority,
@@ -443,7 +402,7 @@ func (c *Controller) createLogicalRouterPoliciesOps(key, v4MgmtIP, v6MgmtIP stri
 		}
 	}
 
-	for _, addr := range v6Endpoints.UnsortedList() {
+	for _, addr := range v6Endpoints {
 		lrp := &nbdb.LogicalRouterPolicy{
 			Match:    fmt.Sprintf("ip6.src == %s", addr),
 			Priority: ovntypes.EgressSVCReroutePriority,

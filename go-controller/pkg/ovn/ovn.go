@@ -273,7 +273,7 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 		addressSetFactory = addressset.NewOvnAddressSetFactory(libovsdbOvnNBClient)
 	}
 	svcController, svcFactory := newServiceController(ovnClient.KubeClient, libovsdbOvnNBClient, recorder)
-	egressSvcController := egresssvc.NewController(ovnClient.KubeClient, libovsdbOvnNBClient, stopChan, svcFactory.Core().V1().Services(),
+	egressSvcController := egresssvc.NewController(ovnClient.KubeClient, libovsdbOvnNBClient, InitClusterEgressPolicies, stopChan, svcFactory.Core().V1().Services(),
 		svcFactory.Discovery().V1().EndpointSlices(),
 		svcFactory.Core().V1().Nodes())
 	return &Controller{
