@@ -37,6 +37,11 @@ func HasEgressSVCAnnotation(svc *kapi.Service) bool {
 	return ok
 }
 
+func HasEgressSVCHostAnnotation(svc *kapi.Service) bool {
+	_, ok := svc.Annotations[EgressSVCHostAnnotation]
+	return ok
+}
+
 // GetEgressSVCHost returns the egress-service-host annotation value
 func GetEgressSVCHost(svc *kapi.Service) (string, error) {
 	host, ok := svc.Annotations[EgressSVCHostAnnotation]

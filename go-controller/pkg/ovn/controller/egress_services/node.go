@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	utilnet "k8s.io/utils/net"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 )
@@ -225,6 +229,47 @@ func (c *Controller) syncNode(key string) error {
 	return nil
 }
 
+func (c *Controller) nodeStateFor(name string) (*nodeState, error) {
+	node, err := c.nodeLister.Get(name)
+	if err != nil {
+		return nil, err
+	}
+
+	nodeSubnets, err := util.ParseNodeHostSubnetAnnotation(node)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse node %s subnets annotation %v", node.Name, err)
+	}
+
+	mgmtIPs := make([]net.IP, len(nodeSubnets))
+	for i, subnet := range nodeSubnets {
+		mgmtIPs[i] = util.GetNodeManagementIfAddr(subnet).IP
+	}
+
+	var v4IP, v6IP net.IP
+	for _, ip := range mgmtIPs {
+		if utilnet.IsIPv4(ip) {
+			v4IP = ip
+			continue
+		}
+		v6IP = ip
+	}
+
+	return &nodeState{name: name, v4MgmtIP: v4IP, v6MgmtIP: v6IP, allocations: map[string]*svcState{}, labels: node.Labels, reachable: true, draining: false}, nil
+}
+
+func (c *Controller) cachedNodesFor(selector labels.Selector) (sets.String, []*nodeState) {
+	names := sets.NewString()
+	states := []*nodeState{}
+	for _, n := range c.nodes {
+		if selector.Matches(labels.Set(n.labels)) {
+			names.Insert(n.name)
+			states = append(states, n)
+		}
+	}
+
+	return names, states
+}
+
 func nodeIsReady(n *corev1.Node) bool {
 	for _, condition := range n.Status.Conditions {
 		if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
@@ -264,6 +309,5 @@ func (c *Controller) patchNodeLabels(node string, labels map[string]any) error {
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	fmt.Println("ORI:", err)
 	return nil
 }

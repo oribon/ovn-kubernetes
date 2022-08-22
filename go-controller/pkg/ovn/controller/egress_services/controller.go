@@ -3,10 +3,16 @@ package egress_services
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -31,6 +37,7 @@ type Controller struct {
 	stopCh   <-chan struct{}
 	sync.Mutex
 
+	initClusterPolicies func(libovsdbclient.Client) error
 	/* revisit, reuse types.DefaultNoRereoutePriority functions for egressip
 	v4JoinSubnet     string
 	v6JoinSubnet     string
@@ -67,14 +74,14 @@ type nodeState struct {
 	v4MgmtIP    net.IP
 	v6MgmtIP    net.IP
 	allocations map[string]*svcState
-	//ready       bool
-	reachable bool
-	draining  bool
+	reachable   bool
+	draining    bool
 }
 
 func NewController(
 	client kubernetes.Interface,
 	nbClient libovsdbclient.Client,
+	initClusterPolicies func(libovsdbclient.Client) error,
 	stopCh <-chan struct{},
 	serviceInformer coreinformers.ServiceInformer,
 	endpointSliceInformer discoveryinformers.EndpointSliceInformer,
@@ -83,6 +90,7 @@ func NewController(
 	c := &Controller{
 		client:              client,
 		nbClient:            nbClient,
+		initClusterPolicies: initClusterPolicies,
 		stopCh:              stopCh,
 		services:            map[string]*svcState{},
 		nodes:               map[string]*nodeState{},
@@ -151,7 +159,12 @@ func (c *Controller) Run(threadiness int) {
 	klog.Infof("Repairing Egress Services")
 	err := c.repair()
 	if err != nil {
-		klog.Errorf("Failed to delete stale Egress Services entries: %v", err)
+		klog.Errorf("Failed to repair Egress Services entries: %v", err)
+	}
+
+	err = c.initClusterPolicies(c.nbClient)
+	if err != nil {
+		klog.Errorf("Failed to init Egress Services cluster policies: %v", err)
 	}
 
 	wg := &sync.WaitGroup{}
@@ -188,8 +201,72 @@ func (c *Controller) Run(threadiness int) {
 }
 
 func (c *Controller) repair() error {
-	// remove all logical router policies
-	// remove all host-labels from nodes
-	// remove all host-annotations from services
+	// create cache from existing resources (service has conf AND host)
+	// remove stale logical router policies if they belong to a deleted service
+	// remove stale lrps if the ip does not belong anymore
+	svcKeyToEndpoints := map[string]sets.String{}
+	services, _ := c.serviceLister.List(labels.Everything())
+	for _, svc := range services {
+		if util.HasEgressSVCAnnotation(svc) && util.HasEgressSVCHostAnnotation(svc) {
+			var err error
+			key, _ := cache.MetaNamespaceKeyFunc(svc)
+			conf, err := util.ParseEgressSVCAnnotation(svc)
+			if err != nil && !util.IsAnnotationNotSetError(err) {
+				klog.Errorf("aa %s", conf)
+				continue
+			}
+			svcHost, _ := util.GetEgressSVCHost(svc)
+			nodeState, ok := c.nodes[svcHost]
+			if !ok {
+				nodeState, err = c.nodeStateFor(svcHost)
+				if err != nil {
+					klog.Errorf("aa %s", svcHost)
+					continue
+				}
+			}
+
+			v4, v6, err := c.allEndpointsFor(svc)
+			if err != nil {
+				klog.Errorf("aa %s", svcHost)
+				continue
+			}
+			svcKeyToEndpoints[key] = sets.NewString(v4.UnsortedList()...)
+			svcKeyToEndpoints[key].Insert(v6.UnsortedList()...)
+
+			selector, _ := metav1.LabelSelectorAsSelector(&conf.NodeSelector)
+			svcState := &svcState{node: svcHost, selector: selector, v4Endpoints: sets.NewString(), v6Endpoints: sets.NewString(), stale: false}
+			nodeState.allocations[key] = svcState
+			c.nodes[svcHost] = nodeState
+		}
+	}
+
+	p := func(item *nbdb.LogicalRouterPolicy) bool {
+		if item.Priority != ovntypes.EgressSVCReroutePriority {
+			return false
+		}
+
+		svcKey := item.ExternalIDs["EgressSVC"]
+		eps, exists := svcKeyToEndpoints[svcKey]
+		if !exists {
+			klog.Infof("egress service repair will delete %s because it is no longer an egress service: %v", svcKey, item)
+			return true
+		}
+
+		// we extract the IP from the match: "ip4.src == IP"
+		splitMatch := strings.Split(item.Match, " ")
+		logicalIP := splitMatch[len(splitMatch)-1]
+		if !eps.Has(logicalIP) {
+			klog.Infof("egress service repair will delete %s because it is no longer an endpoint of the service %s: %v", logicalIP, svcKey, item)
+			return true
+		}
+
+		return false
+	}
+
+	err := libovsdbops.DeleteLogicalRouterPoliciesWithPredicate(c.nbClient, ovntypes.OVNClusterRouter, p)
+	if err != nil {
+		return fmt.Errorf("error deleting stale logical router policies from router %s: %v", ovntypes.OVNClusterRouter, err)
+	}
+
 	return nil
 }
