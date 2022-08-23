@@ -11,7 +11,14 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// onEndpointSliceAdd queues a sync for the relevant Service for a sync
+/*
+	Pretty much a copy of what the services controller does with endpointslices.
+	The main difference is that we queue an endpointslice's service only if
+	it is already in our local cache of known egress services:
+	If it is not there it is either not an egress service or it was not reconciled
+	yet and when it does the endpoint slice change will be included.
+*/
+
 func (c *Controller) onEndpointSliceAdd(obj interface{}) {
 	endpointSlice := obj.(*discovery.EndpointSlice)
 	if endpointSlice == nil {
@@ -21,7 +28,6 @@ func (c *Controller) onEndpointSliceAdd(obj interface{}) {
 	c.queueServiceForEndpointSlice(endpointSlice)
 }
 
-// onEndpointSliceUpdate queues a sync for the relevant Service for a sync
 func (c *Controller) onEndpointSliceUpdate(prevObj, obj interface{}) {
 	prevEndpointSlice := prevObj.(*discovery.EndpointSlice)
 	endpointSlice := obj.(*discovery.EndpointSlice)
@@ -34,9 +40,6 @@ func (c *Controller) onEndpointSliceUpdate(prevObj, obj interface{}) {
 	c.queueServiceForEndpointSlice(endpointSlice)
 }
 
-// onEndpointSliceDelete queues a sync for the relevant Service for a sync if the
-// EndpointSlice resource version does not match the expected version in the
-// endpointSliceTracker.
 func (c *Controller) onEndpointSliceDelete(obj interface{}) {
 	endpointSlice, ok := obj.(*discovery.EndpointSlice)
 	if !ok {
@@ -73,8 +76,8 @@ func (c *Controller) queueServiceForEndpointSlice(endpointSlice *discovery.Endpo
 	c.Lock()
 	defer c.Unlock()
 	_, found := c.services[key]
-	if !found { // we queue a service only if it's in the cache
-		return
+	if !found {
+		return // we queue a service only if it's in the local cache
 	}
 
 	c.servicesQueue.Add(key)

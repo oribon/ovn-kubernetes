@@ -11,6 +11,7 @@ import (
 const (
 	EgressSVCAnnotation     = "k8s.ovn.org/egress-service"
 	EgressSVCHostAnnotation = "k8s.ovn.org/egress-service-host"
+	EgressSVCLabelPrefix    = "egress-service.k8s.ovn.org"
 )
 
 type EgressSVCConfig struct {

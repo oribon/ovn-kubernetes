@@ -26,6 +26,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
 )
 
 const (
@@ -201,11 +202,16 @@ func (c *Controller) Run(threadiness int) {
 	wg.Wait()
 }
 
+// This takes care of syncing stale data which we might have in OVN if
+// there's no ovnkube-master running for a while.
+// It deletes all logical router policies from OVN that belong to services which are no longer
+// egress services, and the policies of endpoints that do not belong to an egress service.
+// In addition, it removes the egress service labels of deleted services from the nodes.
 func (c *Controller) repair() error {
-	// create cache from existing resources (service has conf AND host)
-	// remove stale logical router policies if they belong to a deleted service
-	// remove stale lrps if the ip does not belong anymore
-	svcKeyToEndpoints := map[string]sets.String{}
+	svcKeyToAllV4Endpoints := map[string]sets.String{}
+	svcKeyToAllV6Endpoints := map[string]sets.String{}
+	svcKeyToConfiguredV4Endpoints := map[string][]string{}
+	svcKeyToConfiguredV6Endpoints := map[string][]string{}
 	services, _ := c.serviceLister.List(labels.Everything())
 	for _, svc := range services {
 		if util.HasEgressSVCAnnotation(svc) && util.HasEgressSVCHostAnnotation(svc) {
@@ -213,7 +219,7 @@ func (c *Controller) repair() error {
 			key, _ := cache.MetaNamespaceKeyFunc(svc)
 			conf, err := util.ParseEgressSVCAnnotation(svc)
 			if err != nil && !util.IsAnnotationNotSetError(err) {
-				klog.Errorf("aa %s", conf)
+				klog.Errorf("can't parse %s egress service configuration, err: %v", key, err)
 				continue
 			}
 			svcHost, _ := util.GetEgressSVCHost(svc)
@@ -221,23 +227,26 @@ func (c *Controller) repair() error {
 			if !ok {
 				nodeState, err = c.nodeStateFor(svcHost)
 				if err != nil {
-					klog.Errorf("aa %s", svcHost)
+					klog.Errorf("can't fetch egress service %s node %s state, err: %v", key, svcHost, err)
 					continue
 				}
 			}
 
 			v4, v6, err := c.allEndpointsFor(svc)
 			if err != nil {
-				klog.Errorf("aa %s", svcHost)
+				klog.Errorf("can't fetch all endpoints for egress service %s, err: %v", key, err)
 				continue
 			}
-			svcKeyToEndpoints[key] = sets.NewString(v4.UnsortedList()...)
-			svcKeyToEndpoints[key].Insert(v6.UnsortedList()...)
+			svcKeyToAllV4Endpoints[key] = v4
+			svcKeyToAllV6Endpoints[key] = v6
+			svcKeyToConfiguredV4Endpoints[key] = []string{}
+			svcKeyToConfiguredV6Endpoints[key] = []string{}
 
 			selector, _ := metav1.LabelSelectorAsSelector(&conf.NodeSelector)
 			svcState := &svcState{node: svcHost, selector: selector, v4Endpoints: sets.NewString(), v6Endpoints: sets.NewString(), stale: false}
 			nodeState.allocations[key] = svcState
 			c.nodes[svcHost] = nodeState
+			c.services[key] = svcState
 		}
 	}
 
@@ -247,26 +256,76 @@ func (c *Controller) repair() error {
 		}
 
 		svcKey := item.ExternalIDs["EgressSVC"]
-		eps, exists := svcKeyToEndpoints[svcKey]
+		svc, exists := c.services[svcKey]
 		if !exists {
 			klog.Infof("egress service repair will delete %s because it is no longer an egress service: %v", svcKey, item)
 			return true
 		}
 
-		// we extract the IP from the match: "ip4.src == IP"
+		v4Eps := svcKeyToAllV4Endpoints[svcKey]
+		v6Eps := svcKeyToAllV6Endpoints[svcKey]
+
+		// we extract the IP from the match: "ip4.src == IP" / "ip6.src == IP"
 		splitMatch := strings.Split(item.Match, " ")
 		logicalIP := splitMatch[len(splitMatch)-1]
-		if !eps.Has(logicalIP) {
+		if !v4Eps.Has(logicalIP) && !v6Eps.Has(logicalIP) {
 			klog.Infof("egress service repair will delete %s because it is no longer an endpoint of the service %s: %v", logicalIP, svcKey, item)
 			return true
 		}
 
+		if len(item.Nexthops) != 1 {
+			klog.Infof("egress service repair will delete %s because it is does not have only one nexthop for service %s: %v", logicalIP, svcKey, item)
+			return true
+		}
+
+		node := c.nodes[svc.node]
+		if item.Nexthops[0] != node.v4MgmtIP.String() && item.Nexthops[0] != node.v6MgmtIP.String() {
+			klog.Infof("egress service repair will delete %s because it is uses a stale nexthop for service %s: %v", logicalIP, svcKey, item)
+			return true
+		}
+
+		if utilnet.IsIPv4String(logicalIP) {
+			svcKeyToConfiguredV4Endpoints[svcKey] = append(svcKeyToConfiguredV4Endpoints[svcKey], logicalIP)
+			return false
+		}
+
+		svcKeyToConfiguredV6Endpoints[svcKey] = append(svcKeyToConfiguredV6Endpoints[svcKey], logicalIP)
 		return false
 	}
 
 	err := libovsdbops.DeleteLogicalRouterPoliciesWithPredicate(c.nbClient, ovntypes.OVNClusterRouter, p)
 	if err != nil {
 		return fmt.Errorf("error deleting stale logical router policies from router %s: %v", ovntypes.OVNClusterRouter, err)
+	}
+
+	// update caches after transaction completed
+	for key, v4ToAdd := range svcKeyToConfiguredV4Endpoints {
+		c.services[key].v4Endpoints.Insert(v4ToAdd...)
+	}
+
+	for key, v6ToAdd := range svcKeyToConfiguredV6Endpoints {
+		c.services[key].v6Endpoints.Insert(v6ToAdd...)
+	}
+
+	nodes, _ := c.nodeLister.List(labels.Everything())
+	svcLabelToNode := map[string]string{}
+	for key, state := range c.services {
+		namespace, name, _ := cache.SplitMetaNamespaceKey(key)
+		svcLabelToNode[c.nodeLabelForService(namespace, name)] = state.node
+	}
+
+	for _, node := range nodes {
+		labelsToRemove := map[string]any{}
+		for labelKey := range node.Labels {
+			if strings.HasPrefix(labelKey, util.EgressSVCLabelPrefix) && svcLabelToNode[labelKey] != node.Name {
+				labelsToRemove[labelKey] = nil // Patching with a nil value results in the delete of the key
+			}
+		}
+		err := c.patchNodeLabels(node.Name, labelsToRemove)
+		if err != nil {
+			klog.Errorf("failed to remove stale labels %v from node %s, err: %v", labelsToRemove, node.Name, err)
+			continue
+		}
 	}
 
 	return nil
