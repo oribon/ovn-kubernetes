@@ -12,6 +12,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -37,12 +38,9 @@ type Controller struct {
 	stopCh   <-chan struct{}
 	sync.Mutex
 
-	initClusterPolicies func(libovsdbclient.Client) error
-	/* revisit, reuse types.DefaultNoRereoutePriority functions for egressip
-	v4JoinSubnet     string
-	v6JoinSubnet     string
-	v4ClusterSubnets []*net.IPNet //getClusterSubnets in eip controller / egressfw controller
-	v6ClusterSubnets []*net.IPNet*/
+	initClusterEgressPolicies   func(client libovsdbclient.Client) error
+	createNoRerouteNodePolicies func(client libovsdbclient.Client, node *corev1.Node) error
+	deleteNoRerouteNodePolicies func(client libovsdbclient.Client, node string) error
 
 	services            map[string]*svcState
 	nodes               map[string]*nodeState
@@ -81,20 +79,24 @@ type nodeState struct {
 func NewController(
 	client kubernetes.Interface,
 	nbClient libovsdbclient.Client,
-	initClusterPolicies func(libovsdbclient.Client) error,
+	initClusterEgressPolicies func(libovsdbclient.Client) error,
+	createNoRerouteNodePolicies func(client libovsdbclient.Client, node *corev1.Node) error,
+	deleteNoRerouteNodePolicies func(client libovsdbclient.Client, node string) error,
 	stopCh <-chan struct{},
 	serviceInformer coreinformers.ServiceInformer,
 	endpointSliceInformer discoveryinformers.EndpointSliceInformer,
 	nodeInformer coreinformers.NodeInformer) *Controller {
 	klog.Info("Setting up event handlers for Egress Services")
 	c := &Controller{
-		client:              client,
-		nbClient:            nbClient,
-		initClusterPolicies: initClusterPolicies,
-		stopCh:              stopCh,
-		services:            map[string]*svcState{},
-		nodes:               map[string]*nodeState{},
-		unallocatedServices: map[string]labels.Selector{},
+		client:                      client,
+		nbClient:                    nbClient,
+		initClusterEgressPolicies:   initClusterEgressPolicies,
+		createNoRerouteNodePolicies: createNoRerouteNodePolicies,
+		deleteNoRerouteNodePolicies: deleteNoRerouteNodePolicies,
+		stopCh:                      stopCh,
+		services:                    map[string]*svcState{},
+		nodes:                       map[string]*nodeState{},
+		unallocatedServices:         map[string]labels.Selector{},
 	}
 
 	c.serviceLister = serviceInformer.Lister()
@@ -130,7 +132,6 @@ func NewController(
 	})
 
 	return c
-	// update clustersubnets?
 }
 
 func (c *Controller) Run(threadiness int) {
@@ -162,7 +163,7 @@ func (c *Controller) Run(threadiness int) {
 		klog.Errorf("Failed to repair Egress Services entries: %v", err)
 	}
 
-	err = c.initClusterPolicies(c.nbClient)
+	err = c.initClusterEgressPolicies(c.nbClient)
 	if err != nil {
 		klog.Errorf("Failed to init Egress Services cluster policies: %v", err)
 	}

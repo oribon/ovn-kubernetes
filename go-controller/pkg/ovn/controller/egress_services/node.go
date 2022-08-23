@@ -169,7 +169,7 @@ func (c *Controller) syncNode(key string) error {
 	state := c.nodes[nodeName]
 
 	if n == nil && state == nil {
-		return nil
+		return c.deleteNoRerouteNodePolicies(c.nbClient, key)
 	}
 
 	if n == nil && state != nil {
@@ -180,11 +180,20 @@ func (c *Controller) syncNode(key string) error {
 			}
 			c.servicesQueue.AddRateLimited(svcKey) // can't rely on the annotation change to trigger, can be stuck stale?
 		}
+
+		if err := c.deleteNoRerouteNodePolicies(c.nbClient, key); err != nil {
+			return err
+		}
+
 		delete(c.nodes, nodeName)
 		return nil
 	}
 
-	nodeReady := nodeIsReady(n) // n != nil here
+	if err := c.createNoRerouteNodePolicies(c.nbClient, n); err != nil {
+		return err
+	}
+
+	nodeReady := nodeIsReady(n)
 	nodeLabels := n.Labels
 	if state == nil && !nodeReady {
 		return nil

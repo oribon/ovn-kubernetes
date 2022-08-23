@@ -273,9 +273,7 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 		addressSetFactory = addressset.NewOvnAddressSetFactory(libovsdbOvnNBClient)
 	}
 	svcController, svcFactory := newServiceController(ovnClient.KubeClient, libovsdbOvnNBClient, recorder)
-	egressSvcController := egresssvc.NewController(ovnClient.KubeClient, libovsdbOvnNBClient, InitClusterEgressPolicies, stopChan, svcFactory.Core().V1().Services(),
-		svcFactory.Discovery().V1().EndpointSlices(),
-		svcFactory.Core().V1().Nodes())
+	egressSvcController := newEgressServiceController(ovnClient.KubeClient, libovsdbOvnNBClient, svcFactory, stopChan)
 	return &Controller{
 		client: ovnClient.KubeClient,
 		kube: &kube.Kube{
@@ -840,4 +838,24 @@ func (oc *Controller) StartServiceController(wg *sync.WaitGroup, runRepair bool)
 		}
 	}()
 	return nil
+}
+
+func newEgressServiceController(client clientset.Interface, nbClient libovsdbclient.Client,
+	svcFactory informers.SharedInformerFactory, stopCh <-chan struct{}) *egresssvc.Controller {
+
+	initClusterEgressPolicies := func(libovsdbclient.Client) error { return nil }
+	createNodeNoReroutePolicies := func(libovsdbclient.Client, *kapi.Node) error { return nil }
+	deleteNodeNoReroutePolicies := func(libovsdbclient.Client, string) error { return nil }
+
+	if !config.OVNKubernetesFeature.EnableEgressIP {
+		initClusterEgressPolicies = InitClusterEgressPolicies
+		createNodeNoReroutePolicies = CreateDefaultNoRerouteNodePolicies
+		deleteNodeNoReroutePolicies = DeleteDefaultNoRerouteNodePolicies
+	}
+
+	return egresssvc.NewController(client, nbClient,
+		initClusterEgressPolicies, createNodeNoReroutePolicies, deleteNodeNoReroutePolicies,
+		stopCh, svcFactory.Core().V1().Services(),
+		svcFactory.Discovery().V1().EndpointSlices(),
+		svcFactory.Core().V1().Nodes())
 }
