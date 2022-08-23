@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 
@@ -26,15 +25,20 @@ import (
 	utilnet "k8s.io/utils/net"
 )
 
-// onServiceAdd queues the Service for processing.
 func (c *Controller) onServiceAdd(obj interface{}) {
 	key, err := cache.MetaNamespaceKeyFunc(obj)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
 		return
 	}
+
 	service := obj.(*corev1.Service)
-	if !util.HasEgressSVCAnnotation(service) {
+	// We only care about new LoadBalancer services that have the egress-service config annotation
+	if !util.ServiceTypeHasLoadBalancer(service) {
+		return
+	}
+
+	if !util.HasEgressSVCAnnotation(service) && !util.HasEgressSVCHostAnnotation(service) {
 		return
 	}
 
@@ -42,7 +46,6 @@ func (c *Controller) onServiceAdd(obj interface{}) {
 	c.servicesQueue.Add(key)
 }
 
-// onServiceUpdate updates the Service Selector in the cache and queues the Service for processing.
 func (c *Controller) onServiceUpdate(oldObj, newObj interface{}) {
 	oldService := oldObj.(*corev1.Service)
 	newService := newObj.(*corev1.Service)
@@ -53,7 +56,10 @@ func (c *Controller) onServiceUpdate(oldObj, newObj interface{}) {
 		return
 	}
 
-	if !util.HasEgressSVCAnnotation(oldService) && !util.HasEgressSVCAnnotation(newService) {
+	// We only care about LoadBalancer service updates that enable/disable egress service functionality
+	if !util.HasEgressSVCAnnotation(oldService) && !util.HasEgressSVCAnnotation(newService) &&
+		!util.HasEgressSVCHostAnnotation(oldService) && !util.HasEgressSVCHostAnnotation(newService) &&
+		!util.ServiceTypeHasLoadBalancer(oldService) && !util.ServiceTypeHasLoadBalancer(newService) {
 		return
 	}
 
@@ -63,15 +69,20 @@ func (c *Controller) onServiceUpdate(oldObj, newObj interface{}) {
 	}
 }
 
-// onServiceDelete queues the Service for processing.
 func (c *Controller) onServiceDelete(obj interface{}) {
 	key, err := cache.MetaNamespaceKeyFunc(obj)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
 		return
 	}
+
 	service := obj.(*corev1.Service)
-	if !util.HasEgressSVCAnnotation(service) {
+	// We only care about deletions of LoadBalancer services with the annotations to cleanup
+	if !util.ServiceTypeHasLoadBalancer(service) {
+		return
+	}
+
+	if !util.HasEgressSVCAnnotation(service) && !util.HasEgressSVCHostAnnotation(service) {
 		return
 	}
 
@@ -124,7 +135,7 @@ func (c *Controller) syncService(key string) error {
 	klog.Infof("Processing sync for Egress Service %s/%s", namespace, name)
 
 	defer func() {
-		klog.V(4).Infof("Finished syncing Egress Service %s on namespace %s : %v", name, namespace, time.Since(startTime))
+		klog.V(4).Infof("Finished syncing Egress Service %s/%s : %v", namespace, name, time.Since(startTime))
 	}()
 
 	svc, err := c.serviceLister.Services(namespace).Get(name)
@@ -134,16 +145,22 @@ func (c *Controller) syncService(key string) error {
 
 	state, found := c.services[key]
 	if svc == nil && !found {
-		delete(c.unallocatedServices, key) // just in case
+		// The service was deleted and was not an egress service.
+		// We delete it from the unallocated service cache just in case.
+		delete(c.unallocatedServices, key)
 		return nil
 	}
 
-	if svc == nil {
+	if svc == nil && found {
+		// The service was deleted and was an egress service.
+		// We delete all of its relevant resources to avoid leaving stale configuration.
 		return c.clearServiceResources(key, state)
 	}
 
 	if state != nil && state.stale {
-		return c.clearServiceResources(key, state) // if it's stale the node tried to delete it but failed, attempt cleaning up
+		// The service is marked stale because something failed when trying to delete it.
+		// We try to delete it again before doing anything else.
+		return c.clearServiceResources(key, state)
 	}
 
 	conf, err := util.ParseEgressSVCAnnotation(svc)
@@ -152,14 +169,20 @@ func (c *Controller) syncService(key string) error {
 	}
 
 	if conf == nil && !found {
-		return nil
+		// The service does not have the config annotation and wasn't configured before.
+		// We make sure it does not have a stale host annotation.
+		return c.removeServiceNodeAnnotation(namespace, name)
 	}
 
 	if conf == nil && found {
+		// The service is configured but does no longer have the config annotation,
+		// meaning we should clear all of its resources.
 		return c.clearServiceResources(key, state)
 	}
 
 	if conf != nil && !found {
+		// The service has a valid config annotation and wasn't configured before.
+		// This means we need to select a node for it that matches its selector.
 		selector, _ := metav1.LabelSelectorAsSelector(&conf.NodeSelector)
 		c.unallocatedServices[key] = selector
 
@@ -168,13 +191,8 @@ func (c *Controller) syncService(key string) error {
 			return err
 		}
 
-		err = c.annotateServiceWithNode(name, namespace, node.name)
-		if err != nil {
-			return err
-		}
-
-		delete(c.unallocatedServices, key) // we found a node
-		// updating caches
+		// We found a node - update the caches with the new objects.
+		delete(c.unallocatedServices, key)
 		newState := &svcState{node: node.name, selector: selector, v4Endpoints: sets.NewString(), v6Endpoints: sets.NewString(), stale: false}
 		c.services[key] = newState
 		node.allocations[key] = newState
@@ -186,20 +204,29 @@ func (c *Controller) syncService(key string) error {
 	node := c.nodes[state.node]
 
 	if !state.selector.Matches(labels.Set(node.labels)) {
+		// The node no longer matches the selector.
+		// We clear its configured resources and requeue it to attempt
+		// selecting a new node for it.
 		err := c.clearServiceResources(key, state)
 		if err != nil {
 			return err
 		}
-		c.servicesQueue.AddRateLimited(key)
+
+		c.servicesQueue.Add(key)
 		return nil
 	}
 
-	// todo?: check if assigned node is still valid...
-	// if it matches the labels, if it is ready and reachable
-	// might not be here, we should trigger it from the node's reconciliation
-	// also, think about where/when we label the node
+	// At this point the states are valid and we should create the proper logical router policies.
+	// We reach the desired state by fetching all of the endpoints associated to the service and comparing
+	// to the known state:
+	// We need to create policies for endpoints that were fetched but not found in the cache,
+	// and delete the policies for those which are found in the cache but were not fetched.
+	// We do it in one transaction, if it succeeds we update the cache to reflect the new state.
 
-	// update path
+	err = c.annotateServiceWithNode(namespace, name, state.node) // annotate the service, will also override manual changes
+	if err != nil {
+		return err
+	}
 
 	v4Endpoints, v6Endpoints, err := c.allEndpointsFor(svc)
 	if err != nil {
@@ -228,23 +255,27 @@ func (c *Controller) syncService(key string) error {
 		return fmt.Errorf("failed to update router policies for %s, err: %v", key, err)
 	}
 
-	// update caches
 	state.v4Endpoints.Insert(v4ToAdd.UnsortedList()...)
 	state.v4Endpoints.Delete(v4ToRemove.UnsortedList()...)
 	state.v6Endpoints.Insert(v6ToAdd.UnsortedList()...)
 	state.v6Endpoints.Delete(v6ToRemove.UnsortedList()...)
 
+	// We configured OVN - the last step is to label the node
+	// to mark it as the node holding the service.
 	return c.labelNodeForService(namespace, name, node.name)
 }
 
+// Removes all of the resources that belong to the egress service.
+// This includes removing the host annotation, the logical router policies,
+// the label from the node and updating the caches.
 func (c *Controller) clearServiceResources(key string, svcState *svcState) error {
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return err
 	}
 
-	svcState.stale = true // clear annotation first, as it gets deleted from the cache later
-	if err := c.removeServiceNodeAnnotation(name, namespace); err != nil {
+	svcState.stale = true
+	if err := c.removeServiceNodeAnnotation(namespace, name); err != nil {
 		return err
 	}
 
@@ -275,17 +306,20 @@ func (c *Controller) clearServiceResources(key string, svcState *svcState) error
 	return nil
 }
 
-func (c *Controller) annotateServiceWithNode(name, namespace string, node string) error {
+// Annotates the given service with the 'k8s.ovn.org/egress-service-host=<node>' annotation
+func (c *Controller) annotateServiceWithNode(namespace, name string, node string) error {
 	annotations := map[string]any{util.EgressSVCHostAnnotation: node}
-	return c.patchServiceAnnotations(name, namespace, annotations)
+	return c.patchServiceAnnotations(namespace, name, annotations)
 }
 
-func (c *Controller) removeServiceNodeAnnotation(name, namespace string) error {
-	annotations := map[string]any{util.EgressSVCHostAnnotation: nil} // patching with nil causes a remove
-	return c.patchServiceAnnotations(name, namespace, annotations)
+// Removes the 'k8s.ovn.org/egress-service-host=<node>' annotation from the given service.
+func (c *Controller) removeServiceNodeAnnotation(namespace, name string) error {
+	annotations := map[string]any{util.EgressSVCHostAnnotation: nil} // Patching with a nil value results in the delete of the key
+	return c.patchServiceAnnotations(namespace, name, annotations)
 }
 
-func (c *Controller) patchServiceAnnotations(name, namespace string, annotations map[string]any) error {
+// Patches the service's metadata.annotations with the given annotations.
+func (c *Controller) patchServiceAnnotations(namespace, name string, annotations map[string]any) error {
 	patch := struct {
 		Metadata map[string]any `json:"metadata"`
 	}{
@@ -294,7 +328,7 @@ func (c *Controller) patchServiceAnnotations(name, namespace string, annotations
 		},
 	}
 
-	klog.Infof("Setting annotations %v on service %s/%s", annotations, namespace, name)
+	klog.V(4).Infof("Setting annotations %v on service %s/%s", annotations, namespace, name)
 	patchData, err := json.Marshal(&patch)
 	if err != nil {
 		klog.Errorf("Error in setting annotations on service %s/%s: %v", namespace, name, err)
@@ -309,47 +343,7 @@ func (c *Controller) patchServiceAnnotations(name, namespace string, annotations
 	return nil
 }
 
-func (c *Controller) nodeLabelForService(namespace, name string) string {
-	return fmt.Sprintf("egress-service.k8s.ovn.org/%s-%s", namespace, name)
-}
-
-func (c *Controller) selectNodeFor(selector labels.Selector) (*nodeState, error) {
-	nodes, err := c.nodeLister.List(selector)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: in reachability check, we should mark an unreachable node before deleting it from cache
-	allNodes := sets.NewString()
-	for _, n := range nodes {
-		if nodeIsReady(n) {
-			allNodes.Insert(n.Name)
-		}
-	}
-
-	cachedNames, cachedStates := c.cachedNodesFor(selector)
-
-	freeNodes := allNodes.Difference(cachedNames)
-	if freeNodes.Len() > 0 {
-		// we have a matching node with 0 allocations
-		node, _ := freeNodes.PopAny()
-		return c.nodeStateFor(node)
-	}
-
-	// we need to use one of the used nodes, we will pick the one with the least amount of allocations
-	sort.Slice(cachedStates, func(i, j int) bool {
-		return len(cachedStates[i].allocations) < len(cachedStates[j].allocations)
-	})
-
-	for _, node := range cachedStates {
-		if !node.draining {
-			return node, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no suitable node for selector: %s", selector.String())
-}
-
+// Returns all of the endpoints for the given service grouped by IPv4/IPv6.
 func (c *Controller) allEndpointsFor(svc *corev1.Service) (sets.String, sets.String, error) {
 	// Get the endpoint slices associated to the Service
 	esLabelSelector := labels.Set(map[string]string{
@@ -378,6 +372,8 @@ func (c *Controller) allEndpointsFor(svc *corev1.Service) (sets.String, sets.Str
 	return v4Endpoints, v6Endpoints, nil
 }
 
+// Returns the libovsdb operations to create the logical router policies for the service,
+// given its key, the nexthops (mgmt ips) and endpoints to add.
 func (c *Controller) createLogicalRouterPoliciesOps(key, v4MgmtIP, v6MgmtIP string, v4Endpoints, v6Endpoints []string) ([]libovsdb.Operation, error) {
 	allOps := []libovsdb.Operation{}
 	var err error
@@ -425,6 +421,8 @@ func (c *Controller) createLogicalRouterPoliciesOps(key, v4MgmtIP, v6MgmtIP stri
 	return allOps, nil
 }
 
+// Returns the libovsdb operations to delete the logical router policies for the service,
+// given its key and endpoints to delete.
 func (c *Controller) deleteLogicalRouterPoliciesOps(key string, v4Endpoints, v6Endpoints sets.String) ([]libovsdb.Operation, error) {
 	allOps := []libovsdb.Operation{}
 	var err error

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// Similarly to the EgressIP controller, we loop over all of the nodes that have
+// allocations and check if they are still usable.
 func (c *Controller) checkNodesReachability() {
 	timer := time.NewTicker(5 * time.Second)
 	defer timer.Stop()
@@ -45,7 +48,8 @@ func (c *Controller) checkNodesReachabilityIterate() {
 		wasReachable := node.reachable
 		isReachable := c.isReachable(node)
 		node.reachable = isReachable
-		if wasReachable && !isReachable { // we should start draining it
+		if wasReachable && !isReachable {
+			// The node is not reachable, we need to drain it and reassign its allocations
 			c.nodesQueue.Add(node.name)
 			continue
 		}
@@ -53,18 +57,21 @@ func (c *Controller) checkNodesReachabilityIterate() {
 		startedDrain := node.draining
 		fullyDrained := len(node.allocations) == 0
 		if startedDrain && fullyDrained && isReachable {
+			// We make the node usable for new allocations only when
+			// it has finished draining and is reachable again.
+			// As long it is in the cache and in draining state it can't
+			// be chosen for new allocations.
 			nodesToFree = append(nodesToFree, node.name)
 		}
 	}
 
 	for _, node := range nodesToFree {
 		delete(c.nodes, node)
-		c.nodesQueue.Add(node)
+		c.nodesQueue.Add(node) // Since it is available we queue it as it might match unallocated services
 	}
 }
 
-// implement node reachability check loop
-// implement allow policies (like egressip)
+// TODO: implement this with the new gRPC method
 func (c *Controller) isReachable(node *nodeState) bool {
 	return true
 }
@@ -82,7 +89,7 @@ func (c *Controller) onNodeUpdate(oldObj, newObj interface{}) {
 	oldNode := oldObj.(*corev1.Node)
 	newNode := newObj.(*corev1.Node)
 
-	// don't process resync or objects that are marked for deletion
+	// Don't process resync or objects that are marked for deletion
 	if oldNode.ResourceVersion == newNode.ResourceVersion ||
 		!newNode.GetDeletionTimestamp().IsZero() {
 		return
@@ -93,6 +100,7 @@ func (c *Controller) onNodeUpdate(oldObj, newObj interface{}) {
 	oldNodeReady := nodeIsReady(oldNode)
 	newNodeReady := nodeIsReady(newNode)
 
+	// We only care about node updates that relate to readiness or label changes
 	if labels.Equals(oldNodeLabels, newNodeLabels) &&
 		oldNodeReady == newNodeReady {
 		return
@@ -169,16 +177,22 @@ func (c *Controller) syncNode(key string) error {
 	state := c.nodes[nodeName]
 
 	if n == nil && state == nil {
+		// The node was deleted and was not allocated any service,
+		// we just delete the reroute policies that were added for it.
 		return c.deleteNoRerouteNodePolicies(c.nbClient, key)
 	}
 
 	if n == nil && state != nil {
+		// The node was deleted but had allocated services.
+		// We mark it as draining and remove all of the allocations from it,
+		// queuing them to attempt assigning a new node.
+		// Services can't be assigned to a node while it is in draining status.
 		state.draining = true
 		for svcKey, svcState := range state.allocations {
 			if err := c.clearServiceResources(svcKey, svcState); err != nil {
 				return err
 			}
-			c.servicesQueue.AddRateLimited(svcKey) // can't rely on the annotation change to trigger, can be stuck stale?
+			c.servicesQueue.Add(svcKey)
 		}
 
 		if err := c.deleteNoRerouteNodePolicies(c.nbClient, key); err != nil {
@@ -189,6 +203,8 @@ func (c *Controller) syncNode(key string) error {
 		return nil
 	}
 
+	// We create the per-node reroute policies as long as it has a resource (n != nil at this point),
+	// regardless if it was allocated services or not.
 	if err := c.createNoRerouteNodePolicies(c.nbClient, n); err != nil {
 		return err
 	}
@@ -196,10 +212,13 @@ func (c *Controller) syncNode(key string) error {
 	nodeReady := nodeIsReady(n)
 	nodeLabels := n.Labels
 	if state == nil && !nodeReady {
+		// The node has no allocated services and is not ready, we don't need to do anything with it.
 		return nil
 	}
 
 	if state == nil && nodeReady {
+		// The node has no allocated services and is ready, this means unallocated services whose labels match
+		// the node's labels can be allocated to it.
 		for svcKey, selector := range c.unallocatedServices {
 			if selector.Matches(labels.Set(nodeLabels)) {
 				c.servicesQueue.Add(svcKey)
@@ -209,26 +228,43 @@ func (c *Controller) syncNode(key string) error {
 	}
 
 	if !state.reachable || !nodeReady || state.draining {
+		// The node has allocated services but is not suitable to run them anymore, we drain it
+		// and attempt reallocating its services similarly to the "n == nil && state != nil" path.
 		state.draining = true
 		for svcKey, svcState := range state.allocations {
 			if err := c.clearServiceResources(svcKey, svcState); err != nil {
 				return err
 			}
-			c.servicesQueue.AddRateLimited(svcKey) // can't rely on the annotation change to trigger, can be stuck stale?
+			c.servicesQueue.Add(svcKey)
 		}
 		return nil
 	}
 
 	state.labels = nodeLabels
+	// The node's labels might have changed, we verify that it is still suitable
+	// to run all of its allocations.
+	// If a service's selector no longer matches this node we attempt to reallocate it.
 	for svcKey, svcState := range state.allocations {
 		if !svcState.selector.Matches(labels.Set(n.Labels)) || svcState.stale {
 			if err := c.clearServiceResources(svcKey, svcState); err != nil {
 				return err
 			}
-			c.servicesQueue.AddRateLimited(svcKey) // can't rely on the annotation change to trigger, can be stuck stale?
+			c.servicesQueue.Add(svcKey)
 		}
 	}
 
+	// Label the node again for all of the curret valid allocations in case
+	// the user manually changed it.
+	for svcKey := range state.allocations {
+		namespace, name, _ := cache.SplitMetaNamespaceKey(svcKey)
+		err := c.labelNodeForService(namespace, name, state.name)
+		if err != nil {
+			return err
+		}
+	}
+
+	// The node might match the selectors of an unallocated service.
+	// If it does, we queue that service to attempt allocating it to this node.
 	for svcKey, selector := range c.unallocatedServices {
 		if selector.Matches(labels.Set(nodeLabels)) {
 			c.servicesQueue.Add(svcKey)
@@ -238,6 +274,7 @@ func (c *Controller) syncNode(key string) error {
 	return nil
 }
 
+// Returns a new nodeState for a node given its name.
 func (c *Controller) nodeStateFor(name string) (*nodeState, error) {
 	node, err := c.nodeLister.Get(name)
 	if err != nil {
@@ -266,6 +303,8 @@ func (c *Controller) nodeStateFor(name string) (*nodeState, error) {
 	return &nodeState{name: name, v4MgmtIP: v4IP, v6MgmtIP: v6IP, allocations: map[string]*svcState{}, labels: node.Labels, reachable: true, draining: false}, nil
 }
 
+// Returns the names of all of the nodes in the nodes cache that match the given selector
+// and a slice of their states which can be sorted later.
 func (c *Controller) cachedNodesFor(selector labels.Selector) (sets.String, []*nodeState) {
 	names := sets.NewString()
 	states := []*nodeState{}
@@ -279,6 +318,7 @@ func (c *Controller) cachedNodesFor(selector labels.Selector) (sets.String, []*n
 	return names, states
 }
 
+// Returns if the given node is in "Ready" state.
 func nodeIsReady(n *corev1.Node) bool {
 	for _, condition := range n.Status.Conditions {
 		if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
@@ -288,16 +328,25 @@ func nodeIsReady(n *corev1.Node) bool {
 	return false
 }
 
+// Labels the given node with the 'egress-service.k8s.ovn.org/<svc-namespace>-<svc-name>:""' label
+// which marks it as the node who is holding that service.
 func (c *Controller) labelNodeForService(namespace, name, node string) error {
 	labels := map[string]any{c.nodeLabelForService(namespace, name): ""}
 	return c.patchNodeLabels(node, labels)
 }
 
+// Removes the 'egress-service.k8s.ovn.org/<svc-namespace>-<svc-name>:""' label from the given node.
 func (c *Controller) removeNodeServiceLabel(namespace, name, node string) error {
-	labels := map[string]any{c.nodeLabelForService(namespace, name): nil}
+	labels := map[string]any{c.nodeLabelForService(namespace, name): nil} // Patching with a nil value results in the delete of the key
 	return c.patchNodeLabels(node, labels)
 }
 
+// Returns the 'egress-service.k8s.ovn.org/<svc-namespace>-<svc-name>' key for the given namespace and name of a service.
+func (c *Controller) nodeLabelForService(namespace, name string) string {
+	return fmt.Sprintf("%s/%s-%s", util.EgressSVCLabelPrefix, namespace, name)
+}
+
+// Patches the node's metadata.labels with the given labels.
 func (c *Controller) patchNodeLabels(node string, labels map[string]any) error {
 	patch := struct {
 		Metadata map[string]any `json:"metadata"`
@@ -307,7 +356,7 @@ func (c *Controller) patchNodeLabels(node string, labels map[string]any) error {
 		},
 	}
 
-	klog.Infof("Setting labels %v on node %s", labels, node)
+	klog.V(4).Infof("Setting labels %v on node %s", labels, node)
 	patchData, err := json.Marshal(&patch)
 	if err != nil {
 		klog.Errorf("Error in setting labels on node %s: %v", node, err)
@@ -319,4 +368,46 @@ func (c *Controller) patchNodeLabels(node string, labels map[string]any) error {
 		return err
 	}
 	return nil
+}
+
+// Returns the most suitable nodeState of the node for the given selector -
+// The most suitable node being one that matches the selector with the
+// least amount of allocations and is not in a "draining" state.
+func (c *Controller) selectNodeFor(selector labels.Selector) (*nodeState, error) {
+	nodes, err := c.nodeLister.List(selector)
+	if err != nil {
+		return nil, err
+	}
+
+	allReadyNodes := sets.NewString()
+	for _, n := range nodes {
+		if nodeIsReady(n) {
+			allReadyNodes.Insert(n.Name)
+		}
+	}
+
+	cachedNames, cachedStates := c.cachedNodesFor(selector)
+
+	freeNodes := allReadyNodes.Difference(cachedNames)
+	if freeNodes.Len() > 0 {
+		// We have a matching node with 0 allocations, we can just use it
+		// instead of using one from the cache.
+		node, _ := freeNodes.PopAny()
+		return c.nodeStateFor(node)
+	}
+
+	// We need to use one of the cached nodes, we will pick the one with the least amount of allocations
+	// by first sorting the slice by allocations amount, then iterating over it and picking the first
+	// node that is not in "draining" state.
+	sort.Slice(cachedStates, func(i, j int) bool {
+		return len(cachedStates[i].allocations) < len(cachedStates[j].allocations)
+	})
+
+	for _, node := range cachedStates {
+		if !node.draining {
+			return node, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no suitable node for selector: %s", selector.String())
 }
