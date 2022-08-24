@@ -214,7 +214,8 @@ func (c *Controller) repair() error {
 	svcKeyToConfiguredV6Endpoints := map[string][]string{}
 	services, _ := c.serviceLister.List(labels.Everything())
 	for _, svc := range services {
-		if util.HasEgressSVCAnnotation(svc) && util.HasEgressSVCHostAnnotation(svc) {
+		if util.HasEgressSVCAnnotation(svc) && util.HasEgressSVCHostAnnotation(svc) &&
+			util.ServiceTypeHasLoadBalancer(svc) && len(svc.Status.LoadBalancer.Ingress) > 0 {
 			var err error
 			key, _ := cache.MetaNamespaceKeyFunc(svc)
 			conf, err := util.ParseEgressSVCAnnotation(svc)

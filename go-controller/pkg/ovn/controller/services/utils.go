@@ -110,8 +110,8 @@ func findLegacyLBs(nbClient libovsdbclient.Client) ([]ovnlb.CachedLB, error) {
 	return out, nil
 }
 
-// hasHostEndpoints determines if a slice of endpoints contains a host networked pod
-func hasHostEndpoints(endpointIPs []string) bool {
+// HasHostEndpoints determines if a slice of endpoints contains a host networked pod
+func HasHostEndpoints(endpointIPs []string) bool {
 	for _, endpointIP := range endpointIPs {
 		found := false
 		for _, clusterNet := range globalconfig.Default.ClusterSubnets {

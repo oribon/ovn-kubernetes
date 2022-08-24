@@ -521,8 +521,6 @@ func egressSVCIPTRulesForEndpoints(svc *kapi.Service, v4Eps, v6Eps []string) []i
 // Returns all of the rules that belong to the service.
 // This is done by listing all of the rules in the "OVN-KUBE-EGRESS-SVC" chain and returning those
 // which contain a comment corresponding to the service's namespace/name.
-// We can't re-use the approach we take for create because we can't determine what are the endpoints
-// of a deleted service and we want to be sure we don't leave a stale rule behind.
 func existingEgressSVCIPTRulesFor(svc *kapi.Service) ([]iptRule, error) {
 	allRules := []iptRule{}
 	comment, _ := cache.MetaNamespaceKeyFunc(svc)
@@ -539,17 +537,25 @@ func existingEgressSVCIPTRulesFor(svc *kapi.Service) ([]iptRule, error) {
 		}
 
 		for _, rule := range snatRules {
+			fmt.Println("ORI single rule: ", rule)
 			// An SNAT rule we previously created looks something like:
 			// -A OVN-KUBE-EGRESS-SVC -s podIP -m comment --comment "svcNS/svcName" -j SNAT --to-source svcIP
 			// We find the rules which have the comment unique to this service and extract their args
 			// by removing the "-A OVN-KUBE-EGRESS-SVC" part and splitting by whitespaces.
-			// Also, we need to remove the quotes so the delete does not fail later.
+			// We also need to remove the quotes or the rule is not parsed properly later.
 			if strings.Contains(rule, comment) {
 				argsWithoutQuotes := strings.ReplaceAll(rule, "\"", "")
+				args := strings.Split(argsWithoutQuotes, " ")
+				startFrom := 2
+				if args[0] != "-A" {
+					// fake iptables doesn't insert with -A flag
+					// in that case we don't slice the string
+					startFrom = 0
+				}
 				allRules = append(allRules, iptRule{
 					table:    "nat",
 					chain:    iptableESVCChain,
-					args:     strings.Split(argsWithoutQuotes, " ")[2:],
+					args:     args[startFrom:],
 					protocol: proto,
 				})
 			}

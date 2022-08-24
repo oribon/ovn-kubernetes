@@ -10,6 +10,7 @@ import (
 	libovsdb "github.com/ovn-org/libovsdb/ovsdb"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
 	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -22,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	utilnet "k8s.io/utils/net"
 )
 
 func (c *Controller) onServiceAdd(obj interface{}) {
@@ -34,7 +34,7 @@ func (c *Controller) onServiceAdd(obj interface{}) {
 
 	service := obj.(*corev1.Service)
 	// We only care about new LoadBalancer services that have the egress-service config annotation
-	if !util.ServiceTypeHasLoadBalancer(service) {
+	if !util.ServiceTypeHasLoadBalancer(service) || len(service.Status.LoadBalancer.Ingress) == 0 {
 		return
 	}
 
@@ -143,15 +143,15 @@ func (c *Controller) syncService(key string) error {
 		return err
 	}
 
-	state, found := c.services[key]
-	if svc == nil && !found {
+	state := c.services[key]
+	if svc == nil && state == nil {
 		// The service was deleted and was not an egress service.
 		// We delete it from the unallocated service cache just in case.
 		delete(c.unallocatedServices, key)
 		return nil
 	}
 
-	if svc == nil && found {
+	if svc == nil && state != nil {
 		// The service was deleted and was an egress service.
 		// We delete all of its relevant resources to avoid leaving stale configuration.
 		return c.clearServiceResources(key, state)
@@ -163,24 +163,57 @@ func (c *Controller) syncService(key string) error {
 		return c.clearServiceResources(key, state)
 	}
 
+	if state == nil && len(svc.Status.LoadBalancer.Ingress) == 0 {
+		// The service wasn't configured before and does not have an ingress ip.
+		// we don't need to configure it and make sure it does not have a stale host annotation or unallocated entry.
+		delete(c.unallocatedServices, key)
+		return c.removeServiceNodeAnnotation(namespace, name)
+	}
+
+	if state != nil && len(svc.Status.LoadBalancer.Ingress) == 0 {
+		// The service has no ingress ips so it is not considered valid anymore.
+		return c.clearServiceResources(key, state)
+	}
+
 	conf, err := util.ParseEgressSVCAnnotation(svc)
 	if err != nil && !util.IsAnnotationNotSetError(err) {
 		return err
 	}
 
-	if conf == nil && !found {
+	if conf == nil && state == nil {
 		// The service does not have the config annotation and wasn't configured before.
-		// We make sure it does not have a stale host annotation.
+		// We make sure it does not have a stale host annotation or unallocated entry.
+		delete(c.unallocatedServices, key)
 		return c.removeServiceNodeAnnotation(namespace, name)
 	}
 
-	if conf == nil && found {
+	if conf == nil && state != nil {
 		// The service is configured but does no longer have the config annotation,
 		// meaning we should clear all of its resources.
 		return c.clearServiceResources(key, state)
 	}
 
-	if conf != nil && !found {
+	v4Endpoints, v6Endpoints, err := c.allEndpointsFor(svc)
+	if err != nil {
+		return err
+	}
+
+	// We check if the service has a local host endpoint to avoid
+	// creating an SNAT rule for a host's source ip, which will
+	// break all of its egress traffic.
+	hasHostEndpoint := services.HasHostEndpoints(v4Endpoints.UnsortedList()) ||
+		services.HasHostEndpoints(v6Endpoints.UnsortedList())
+
+	if state == nil && hasHostEndpoint {
+		delete(c.unallocatedServices, key)
+		return c.removeServiceNodeAnnotation(namespace, name)
+	}
+
+	if state != nil && hasHostEndpoint {
+		return c.clearServiceResources(key, state)
+	}
+
+	if conf != nil && state == nil {
 		// The service has a valid config annotation and wasn't configured before.
 		// This means we need to select a node for it that matches its selector.
 		selector, _ := metav1.LabelSelectorAsSelector(&conf.NodeSelector)
@@ -207,13 +240,7 @@ func (c *Controller) syncService(key string) error {
 		// The node no longer matches the selector.
 		// We clear its configured resources and requeue it to attempt
 		// selecting a new node for it.
-		err := c.clearServiceResources(key, state)
-		if err != nil {
-			return err
-		}
-
-		c.servicesQueue.Add(key)
-		return nil
+		return c.clearServiceResources(key, state)
 	}
 
 	// At this point the states are valid and we should create the proper logical router policies.
@@ -224,11 +251,6 @@ func (c *Controller) syncService(key string) error {
 	// We do it in one transaction, if it succeeds we update the cache to reflect the new state.
 
 	err = c.annotateServiceWithNode(namespace, name, state.node) // annotate the service, will also override manual changes
-	if err != nil {
-		return err
-	}
-
-	v4Endpoints, v6Endpoints, err := c.allEndpointsFor(svc)
 	if err != nil {
 		return err
 	}
@@ -268,6 +290,8 @@ func (c *Controller) syncService(key string) error {
 // Removes all of the resources that belong to the egress service.
 // This includes removing the host annotation, the logical router policies,
 // the label from the node and updating the caches.
+// This also requeues the service after cleaning up to be sure we are not
+// missing an event after marking it as stale that should be handled.
 func (c *Controller) clearServiceResources(key string, svcState *svcState) error {
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -303,6 +327,7 @@ func (c *Controller) clearServiceResources(key string, svcState *svcState) error
 
 	delete(c.services, key)
 	delete(c.unallocatedServices, key)
+	c.servicesQueue.Add(key)
 	return nil
 }
 
@@ -358,14 +383,17 @@ func (c *Controller) allEndpointsFor(svc *corev1.Service) (sets.String, sets.Str
 	v4Endpoints := sets.NewString()
 	v6Endpoints := sets.NewString()
 	for _, eps := range endpointSlices {
+		if eps.AddressType == discovery.AddressTypeFQDN {
+			continue
+		}
+
+		epsToInsert := v4Endpoints
+		if eps.AddressType == discovery.AddressTypeIPv6 {
+			epsToInsert = v6Endpoints
+		}
+
 		for _, ep := range eps.Endpoints {
-			for _, addr := range ep.Addresses {
-				if utilnet.IsIPv4String(addr) {
-					v4Endpoints.Insert(addr)
-					continue
-				}
-				v6Endpoints.Insert(addr)
-			}
+			epsToInsert.Insert(ep.Addresses...)
 		}
 	}
 

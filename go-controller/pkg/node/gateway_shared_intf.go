@@ -413,6 +413,7 @@ func (npw *nodePortWatcher) updateServiceInfo(index ktypes.NamespacedName, servi
 // addServiceRules ensures the correct iptables rules and OpenFlow physical
 // flows are programmed for a given service and endpoint configuration
 func addServiceRules(service *kapi.Service, svcHasLocalHostNetEndPnt bool, npw *nodePortWatcher) {
+	fmt.Println("ORI in add")
 	// For dpu or Full mode
 	if npw != nil {
 		npw.updateServiceFlowCache(service, true, svcHasLocalHostNetEndPnt)
@@ -421,7 +422,7 @@ func addServiceRules(service *kapi.Service, svcHasLocalHostNetEndPnt bool, npw *
 			// add iptable rules only in full mode
 			addGatewayIptRules(service, svcHasLocalHostNetEndPnt)
 		}
-		updateEgressSVCIptRules(service, npw)
+		updateEgressSVCIptRules(service, svcHasLocalHostNetEndPnt, npw)
 		return
 	}
 	// For Host Only Mode
@@ -488,8 +489,10 @@ func serviceUpdateNotNeeded(old, new *kapi.Service) bool {
 
 // AddService handles configuring shared gateway bridge flows to steer External IP, Node Port, Ingress LB traffic into OVN
 func (npw *nodePortWatcher) AddService(service *kapi.Service) {
+	fmt.Println("ORI in addService")
 	var hasLocalHostNetworkEp bool
 	if !util.ServiceTypeHasClusterIP(service) || !util.IsClusterIPSet(service) {
+		fmt.Println("ORI whoops1")
 		return
 	}
 
@@ -497,6 +500,7 @@ func (npw *nodePortWatcher) AddService(service *kapi.Service) {
 	name := ktypes.NamespacedName{Namespace: service.Namespace, Name: service.Name}
 	epSlices, err := npw.watchFactory.GetEndpointSlices(service.Namespace, service.Name)
 	if err != nil {
+		fmt.Println("ORI whoops2")
 		klog.V(5).Infof("No endpointslice found for service %s in namespace %s during service Add", service.Name, service.Namespace)
 		// No endpoint object exists yet so default to false
 		hasLocalHostNetworkEp = false
@@ -507,9 +511,11 @@ func (npw *nodePortWatcher) AddService(service *kapi.Service) {
 
 	// If something didn't already do it add correct Service rules
 	if exists := npw.addOrSetServiceInfo(name, service, hasLocalHostNetworkEp); !exists {
+		fmt.Println("ORI exists addOrSet")
 		klog.V(5).Infof("Service Add %s event in namespace %s came before endpoint event setting svcConfig", service.Name, service.Namespace)
 		addServiceRules(service, hasLocalHostNetworkEp, npw)
 	} else {
+		fmt.Println("ORI already programmed")
 		klog.V(5).Infof("Rules already programmed for %s in namespace %s", service.Name, service.Namespace)
 	}
 }
@@ -646,6 +652,25 @@ func (npw *nodePortWatcher) SyncServices(services []interface{}) error {
 		}
 		recreateIPTRules("mangle", iptableITPChain, keepIPTRules)
 	}
+	for _, serviceInterface := range services {
+
+		service, ok := serviceInterface.(*kapi.Service)
+		if !ok {
+			klog.Errorf("Spurious object in syncServices: %v",
+				serviceInterface)
+			continue
+		}
+
+		epSlices, err := npw.watchFactory.GetEndpointSlices(service.Namespace, service.Name)
+		if err != nil {
+			klog.V(5).Infof("No endpointslice found for service %s in namespace %s during sync", service.Name, service.Namespace)
+			continue
+		}
+		nodeIPs := npw.nodeIPManager.ListAddresses()
+		hasLocalHostNetworkEp := hasLocalHostNetworkEndpoints(epSlices, nodeIPs)
+		updateEgressSVCIptRules(service, hasLocalHostNetworkEp, npw)
+
+	}
 	// FIXME(FF): This function must propagate errors back to caller.
 	// https://bugzilla.redhat.com/show_bug.cgi?id=2081857
 	return nil
@@ -688,7 +713,7 @@ func (npw *nodePortWatcher) AddEndpointSlice(epSlice *discovery.EndpointSlice) {
 	}
 
 	// Call this in case it wasn't already called in addServiceRules
-	updateEgressSVCIptRules(svc, npw)
+	updateEgressSVCIptRules(svc, hasLocalHostNetworkEp, npw)
 }
 
 func (npw *nodePortWatcher) DeleteEndpointSlice(epSlice *discovery.EndpointSlice) {
@@ -756,7 +781,7 @@ func (npw *nodePortWatcher) UpdateEndpointSlice(oldEpSlice, newEpSlice *discover
 		if err != nil {
 			return
 		}
-		updateEgressSVCIptRules(svc, npw)
+		updateEgressSVCIptRules(svc, hasLocalHostNetworkEpNew, npw)
 	}
 }
 

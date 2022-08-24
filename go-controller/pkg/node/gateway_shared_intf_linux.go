@@ -75,12 +75,20 @@ func delGatewayIptRules(service *kapi.Service, svcHasLocalHostNetEndPnt bool) {
 	}
 }
 
-func updateEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) {
+func updateEgressSVCIptRules(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, npw *nodePortWatcher) {
+	fmt.Println("ORI in update")
 	if !egressSVCBelongsTo(npw.nodeName, svc) {
+		fmt.Println("ORI no belong")
 		return
 	}
 
 	if len(svc.Status.LoadBalancer.Ingress) == 0 {
+		fmt.Println("ORI no ip")
+		return
+	}
+
+	if svcHasLocalHostNetEndPnt {
+		fmt.Println("ORI has localep")
 		return
 	}
 
@@ -105,35 +113,33 @@ func updateEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) {
 		return
 	}
 
-	v4Eps := []string{}
-	v6Eps := []string{}
+	v4Eps := &[]string{}
+	v6Eps := &[]string{}
 	for _, epSlice := range epSlices {
-		appendTo := v4Eps
-		if epSlice.AddressType == v1.AddressTypeIPv6 {
-			appendTo = v6Eps
-		}
 		if epSlice.AddressType == v1.AddressTypeFQDN {
 			continue
 		}
+		epsToAppend := v4Eps
+		if epSlice.AddressType == v1.AddressTypeIPv6 {
+			epsToAppend = v6Eps
+		}
 
 		for _, ep := range epSlice.Endpoints {
-			appendTo = append(appendTo, ep.Addresses...)
+			*epsToAppend = append(*epsToAppend, ep.Addresses...)
 		}
 	}
 
 	v4ToAdd := []string{}
 	v6ToAdd := []string{}
-	for _, addr := range v4Eps {
-		_, found := copied[addr]
-		if found {
+	for _, addr := range *v4Eps {
+		if copied[addr] {
 			delete(copied, addr)
 			continue
 		}
 		v4ToAdd = append(v4ToAdd, addr)
 	}
-	for _, addr := range v6Eps {
-		_, found := copied[addr]
-		if found {
+	for _, addr := range *v6Eps {
+		if copied[addr] {
 			delete(copied, addr)
 			continue
 		}
@@ -179,15 +185,18 @@ func updateEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) {
 }
 
 func delAllEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) {
+	fmt.Println("ORI In delete")
 	npw.egressServiceInfoLock.Lock()
 	defer npw.egressServiceInfoLock.Unlock()
 	key := ktypes.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
 	_, found := npw.egressServiceInfo[key]
 	if !found {
+		fmt.Println("ORI delete not found")
 		return
 	}
 
 	rules, err := existingEgressSVCIPTRulesFor(svc)
+	fmt.Println("ORI rules:", rules)
 	if err != nil {
 		klog.Errorf("Failed to get iptables rules for service %s/%s: %v", svc.Namespace, svc.Name, err)
 		return
