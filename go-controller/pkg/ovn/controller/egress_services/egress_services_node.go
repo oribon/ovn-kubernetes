@@ -192,7 +192,6 @@ func (c *Controller) syncNode(key string) error {
 			if err := c.clearServiceResources(svcKey, svcState); err != nil {
 				return err
 			}
-			c.servicesQueue.Add(svcKey)
 		}
 
 		if err := c.deleteNoRerouteNodePolicies(c.nbClient, key); err != nil {
@@ -235,7 +234,6 @@ func (c *Controller) syncNode(key string) error {
 			if err := c.clearServiceResources(svcKey, svcState); err != nil {
 				return err
 			}
-			c.servicesQueue.Add(svcKey)
 		}
 		return nil
 	}
@@ -249,7 +247,6 @@ func (c *Controller) syncNode(key string) error {
 			if err := c.clearServiceResources(svcKey, svcState); err != nil {
 				return err
 			}
-			c.servicesQueue.Add(svcKey)
 		}
 	}
 
