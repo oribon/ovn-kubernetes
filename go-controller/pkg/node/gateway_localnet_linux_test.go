@@ -48,7 +48,7 @@ func initFakeNodePortWatcher(iptV4, iptV6 util.IPTablesHelper) *nodePortWatcher 
 		gatewayIPv6:       v6localnetGatewayIP,
 		nodeName:          "mynode",
 		serviceInfo:       make(map[k8stypes.NamespacedName]*serviceConfig),
-		egressServiceInfo: make(map[k8stypes.NamespacedName]map[string]bool),
+		egressServiceInfo: make(map[k8stypes.NamespacedName]*serviceEps),
 		ofm: &openflowManager{
 			flowCache: map[string][]string{},
 		},
@@ -2272,7 +2272,7 @@ var _ = Describe("Node Operations", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("AAAA manages iptables rules for LoadBalancer egress service backed by ovn-k pods", func() {
+		It("manages iptables rules for LoadBalancer egress service backed by ovn-k pods", func() {
 			app.Action = func(ctx *cli.Context) error {
 				config.Gateway.Mode = config.GatewayModeShared
 				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
@@ -2331,9 +2331,7 @@ var _ = Describe("Node Operations", func() {
 
 				fNPW.watchFactory = fakeOvnNode.watcher
 				Expect(startNodePortWatcher(fNPW, fakeOvnNode.fakeClient, &fakeMgmtPortConfig)).To(Succeed())
-				fmt.Println("ORI Before add")
 				fNPW.AddService(&service)
-				fmt.Println("Ori After add")
 
 				expectedTables := map[string]util.FakeTable{
 					"nat": {

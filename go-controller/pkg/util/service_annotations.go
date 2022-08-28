@@ -18,7 +18,7 @@ type EgressSVCConfig struct {
 	NodeSelector metav1.LabelSelector `json:"nodeSelector,omitempty"`
 }
 
-// ParseEgressSVCAnnotation returns the parsed egress-service annotation
+// ParseEgressSVCAnnotation returns the parsed egress-service annotation.
 func ParseEgressSVCAnnotation(svc *kapi.Service) (*EgressSVCConfig, error) {
 	annotation, ok := svc.Annotations[EgressSVCAnnotation]
 	if !ok {
@@ -33,17 +33,21 @@ func ParseEgressSVCAnnotation(svc *kapi.Service) (*EgressSVCConfig, error) {
 	return cfg, nil
 }
 
+// HasEgressSVCAnnotation returns true if the service has an egress-service
+// config annotation.
 func HasEgressSVCAnnotation(svc *kapi.Service) bool {
 	_, ok := svc.Annotations[EgressSVCAnnotation]
 	return ok
 }
 
+// HasEgressSVCHostAnnotation returns true if the service has an egress-service-host
+// annotation.
 func HasEgressSVCHostAnnotation(svc *kapi.Service) bool {
 	_, ok := svc.Annotations[EgressSVCHostAnnotation]
 	return ok
 }
 
-// GetEgressSVCHost returns the egress-service-host annotation value
+// GetEgressSVCHost returns the egress-service-host annotation value.
 func GetEgressSVCHost(svc *kapi.Service) (string, error) {
 	host, ok := svc.Annotations[EgressSVCHostAnnotation]
 	if !ok {
@@ -53,6 +57,8 @@ func GetEgressSVCHost(svc *kapi.Service) (string, error) {
 	return host, nil
 }
 
+// EgressSVCHostChanged returns true if both services have the same
+// egress-service-host annotation value.
 func EgressSVCHostChanged(oldSVC, newSVC *kapi.Service) bool {
 	return oldSVC.Annotations[EgressSVCHostAnnotation] != newSVC.Annotations[EgressSVCHostAnnotation]
 }

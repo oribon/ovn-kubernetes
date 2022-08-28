@@ -9,7 +9,6 @@ import (
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilnet "k8s.io/utils/net"
 
 	kapi "k8s.io/api/core/v1"
 	v1 "k8s.io/api/discovery/v1"
@@ -76,19 +75,7 @@ func delGatewayIptRules(service *kapi.Service, svcHasLocalHostNetEndPnt bool) {
 }
 
 func updateEgressSVCIptRules(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, npw *nodePortWatcher) {
-	fmt.Println("ORI in update")
-	if !egressSVCBelongsTo(npw.nodeName, svc) {
-		fmt.Println("ORI no belong")
-		return
-	}
-
-	if len(svc.Status.LoadBalancer.Ingress) == 0 {
-		fmt.Println("ORI no ip")
-		return
-	}
-
-	if svcHasLocalHostNetEndPnt {
-		fmt.Println("ORI has localep")
+	if !configureEgressSVC(svc, svcHasLocalHostNetEndPnt, npw) {
 		return
 	}
 
@@ -98,13 +85,16 @@ func updateEgressSVCIptRules(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, n
 	key := ktypes.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
 	cachedEps := npw.egressServiceInfo[key]
 	if cachedEps == nil {
-		cachedEps = map[string]bool{}
+		cachedEps = &serviceEps{map[string]bool{}, map[string]bool{}}
 		npw.egressServiceInfo[key] = cachedEps
 	}
 
-	copied := map[string]bool{}
-	for k, v := range cachedEps {
-		copied[k] = v
+	copiedEps := serviceEps{}
+	for addr := range cachedEps.v4 {
+		copiedEps.v4[addr] = true
+	}
+	for addr := range cachedEps.v6 {
+		copiedEps.v6[addr] = true
 	}
 
 	epSlices, err := npw.watchFactory.GetEndpointSlices(svc.Namespace, svc.Name)
@@ -132,15 +122,15 @@ func updateEgressSVCIptRules(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, n
 	v4ToAdd := []string{}
 	v6ToAdd := []string{}
 	for _, addr := range *v4Eps {
-		if copied[addr] {
-			delete(copied, addr)
+		if copiedEps.v4[addr] {
+			delete(copiedEps.v4, addr)
 			continue
 		}
 		v4ToAdd = append(v4ToAdd, addr)
 	}
 	for _, addr := range *v6Eps {
-		if copied[addr] {
-			delete(copied, addr)
+		if copiedEps.v6[addr] {
+			delete(copiedEps.v6, addr)
 			continue
 		}
 		v6ToAdd = append(v6ToAdd, addr)
@@ -153,20 +143,19 @@ func updateEgressSVCIptRules(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, n
 	}
 
 	for _, addr := range v4ToAdd {
-		cachedEps[addr] = true
+		cachedEps.v4[addr] = true
 	}
 
 	for _, addr := range v6ToAdd {
-		cachedEps[addr] = true
+		cachedEps.v6[addr] = true
 	}
 
 	v4ToDelete := []string{}
 	v6ToDelete := []string{}
-	for addr := range copied {
-		if utilnet.IsIPv4String(addr) {
-			v4ToDelete = append(v4ToDelete, addr)
-			continue
-		}
+	for addr := range copiedEps.v4 {
+		v4ToDelete = append(v4ToDelete, addr)
+	}
+	for addr := range copiedEps.v6 {
 		v6ToDelete = append(v6ToDelete, addr)
 	}
 
@@ -177,32 +166,33 @@ func updateEgressSVCIptRules(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, n
 	}
 
 	for _, addr := range v4ToDelete {
-		delete(cachedEps, addr)
+		delete(cachedEps.v4, addr)
 	}
 	for _, addr := range v6ToDelete {
-		delete(cachedEps, addr)
+		delete(cachedEps.v6, addr)
 	}
 }
 
 func delAllEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) {
-	fmt.Println("ORI In delete")
 	npw.egressServiceInfoLock.Lock()
 	defer npw.egressServiceInfoLock.Unlock()
 	key := ktypes.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
-	_, found := npw.egressServiceInfo[key]
+	eps, found := npw.egressServiceInfo[key]
 	if !found {
-		fmt.Println("ORI delete not found")
 		return
 	}
 
-	rules, err := existingEgressSVCIPTRulesFor(svc)
-	fmt.Println("ORI rules:", rules)
-	if err != nil {
-		klog.Errorf("Failed to get iptables rules for service %s/%s: %v", svc.Namespace, svc.Name, err)
-		return
+	v4ToDelete := []string{}
+	v6ToDelete := []string{}
+	for addr := range eps.v4 {
+		v4ToDelete = append(v4ToDelete, addr)
+	}
+	for addr := range eps.v6 {
+		v6ToDelete = append(v6ToDelete, addr)
 	}
 
-	if err := delIptRules(rules); err != nil {
+	delRules := egressSVCIPTRulesForEndpoints(svc, v4ToDelete, v6ToDelete)
+	if err := delIptRules(delRules); err != nil {
 		klog.Errorf("Failed to delete iptables rules for service %s/%s: %v", svc.Namespace, svc.Name, err)
 		return
 	}
@@ -210,7 +200,11 @@ func delAllEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) {
 	delete(npw.egressServiceInfo, key)
 }
 
-func egressSVCBelongsTo(node string, svc *kapi.Service) bool {
-	host, _ := util.GetEgressSVCHost(svc)
-	return host == node
+func configureEgressSVC(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, npw *nodePortWatcher) bool {
+	svcHost, _ := util.GetEgressSVCHost(svc)
+
+	return svcHost == npw.nodeName &&
+		svc.Spec.Type == kapi.ServiceTypeLoadBalancer &&
+		len(svc.Status.LoadBalancer.Ingress) > 0 &&
+		!svcHasLocalHostNetEndPnt
 }
