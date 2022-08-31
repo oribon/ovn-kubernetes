@@ -11,6 +11,8 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
 	kapi "k8s.io/api/core/v1"
+	v1 "k8s.io/api/discovery/v1"
+	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 )
 
@@ -70,4 +72,147 @@ func delGatewayIptRules(service *kapi.Service, svcHasLocalHostNetEndPnt bool) {
 	if err := delIptRules(rules); err != nil {
 		klog.Errorf("Failed to delete iptables rules for service %s/%s: %v", service.Namespace, service.Name, err)
 	}
+}
+
+func updateEgressSVCIptRules(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, npw *nodePortWatcher) {
+	if !shouldConfigureEgressSVC(svc, svcHasLocalHostNetEndPnt, npw) {
+		return
+	}
+
+	npw.egressServiceInfoLock.Lock()
+	defer npw.egressServiceInfoLock.Unlock()
+
+	key := ktypes.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
+	cachedEps := npw.egressServiceInfo[key]
+	if cachedEps == nil {
+		cachedEps = &serviceEps{map[string]bool{}, map[string]bool{}}
+		npw.egressServiceInfo[key] = cachedEps
+	}
+
+	// We create a copy of the cached eps for the service to deduce which
+	// eps should be added/removed iptables rules.
+	copiedEps := serviceEps{}
+	for addr := range cachedEps.v4 {
+		copiedEps.v4[addr] = true
+	}
+	for addr := range cachedEps.v6 {
+		copiedEps.v6[addr] = true
+	}
+
+	epSlices, err := npw.watchFactory.GetEndpointSlices(svc.Namespace, svc.Name)
+	if err != nil {
+		klog.V(5).Infof("No endpointslice found for egress service %s in namespace %s during update", svc.Name, svc.Namespace)
+		return
+	}
+
+	v4Eps := &[]string{} // All current v4 eps
+	v6Eps := &[]string{} // All current v6 eps
+	for _, epSlice := range epSlices {
+		if epSlice.AddressType == v1.AddressTypeFQDN {
+			continue
+		}
+		epsToAppend := v4Eps
+		if epSlice.AddressType == v1.AddressTypeIPv6 {
+			epsToAppend = v6Eps
+		}
+
+		for _, ep := range epSlice.Endpoints {
+			*epsToAppend = append(*epsToAppend, ep.Addresses...)
+		}
+	}
+
+	// If an iptable rule already exists in the cache we don't need to do anything,
+	// otherwise we add a new rule for it later.
+	v4ToAdd := []string{}
+	v6ToAdd := []string{}
+	for _, addr := range *v4Eps {
+		if copiedEps.v4[addr] {
+			delete(copiedEps.v4, addr)
+			continue
+		}
+		v4ToAdd = append(v4ToAdd, addr)
+	}
+	for _, addr := range *v6Eps {
+		if copiedEps.v6[addr] {
+			delete(copiedEps.v6, addr)
+			continue
+		}
+		v6ToAdd = append(v6ToAdd, addr)
+	}
+
+	addRules := egressSVCIPTRulesForEndpoints(svc, v4ToAdd, v6ToAdd)
+	if err := addIptRules(addRules); err != nil {
+		klog.Errorf("Failed to add iptables rules for service %s/%s: %v", svc.Namespace, svc.Name, err)
+		return
+	}
+
+	// Update the cache with the added endpoints.
+	for _, addr := range v4ToAdd {
+		cachedEps.v4[addr] = true
+	}
+
+	for _, addr := range v6ToAdd {
+		cachedEps.v6[addr] = true
+	}
+
+	// We need to delete the rules that correspond to deleted endpoints -
+	// these are the addresses that we did not delete from the copy of the cache earlier.
+	v4ToDelete := make([]string, len(copiedEps.v4))
+	v6ToDelete := make([]string, len(copiedEps.v6))
+	for addr := range copiedEps.v4 {
+		v4ToDelete = append(v4ToDelete, addr)
+	}
+	for addr := range copiedEps.v6 {
+		v6ToDelete = append(v6ToDelete, addr)
+	}
+
+	delRules := egressSVCIPTRulesForEndpoints(svc, v4ToDelete, v6ToDelete)
+	if err := delIptRules(delRules); err != nil {
+		klog.Errorf("Failed to delete iptables rules for service %s/%s: %v", svc.Namespace, svc.Name, err)
+		return
+	}
+
+	// Update the cache with the deleted endpoints.
+	for _, addr := range v4ToDelete {
+		delete(cachedEps.v4, addr)
+	}
+	for _, addr := range v6ToDelete {
+		delete(cachedEps.v6, addr)
+	}
+}
+
+func delAllEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) {
+	npw.egressServiceInfoLock.Lock()
+	defer npw.egressServiceInfoLock.Unlock()
+	key := ktypes.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
+	allEps, found := npw.egressServiceInfo[key]
+	if !found {
+		return
+	}
+
+	v4ToDelete := make([]string, len(allEps.v4))
+	v6ToDelete := make([]string, len(allEps.v6))
+	for addr := range allEps.v4 {
+		v4ToDelete = append(v4ToDelete, addr)
+	}
+	for addr := range allEps.v6 {
+		v6ToDelete = append(v6ToDelete, addr)
+	}
+
+	delRules := egressSVCIPTRulesForEndpoints(svc, v4ToDelete, v6ToDelete)
+	if err := delIptRules(delRules); err != nil {
+		klog.Errorf("Failed to delete iptables rules for service %s/%s: %v", svc.Namespace, svc.Name, err)
+		return
+	}
+
+	delete(npw.egressServiceInfo, key)
+}
+
+func shouldConfigureEgressSVC(svc *kapi.Service, svcHasLocalHostNetEndPnt bool, npw *nodePortWatcher) bool {
+	svcHost, _ := util.GetEgressSVCHost(svc)
+
+	return svcHost == npw.nodeName &&
+		svc.Spec.Type == kapi.ServiceTypeLoadBalancer &&
+		len(svc.Status.LoadBalancer.Ingress) > 0 &&
+		!svcHasLocalHostNetEndPnt
 }
