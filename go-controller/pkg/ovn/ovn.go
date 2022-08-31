@@ -17,6 +17,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
 	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	egresssvc "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egress_services"
 	svccontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
 	corev1listers "k8s.io/client-go/listers/core/v1"
@@ -172,6 +173,8 @@ type Controller struct {
 
 	// Controller used to handle services
 	svcController *svccontroller.Controller
+	// Controller used to handle egress services
+	egressSvcController *egresssvc.Controller
 	// svcFactory used to handle service related events
 	svcFactory informers.SharedInformerFactory
 
@@ -268,6 +271,7 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 		addressSetFactory = addressset.NewOvnAddressSetFactory(libovsdbOvnNBClient)
 	}
 	svcController, svcFactory := newServiceController(ovnClient.KubeClient, libovsdbOvnNBClient, recorder)
+	egressSvcController := newEgressServiceController(ovnClient.KubeClient, libovsdbOvnNBClient, svcFactory, stopChan)
 	var hybridOverlaySubnetAllocator *subnetallocator.SubnetAllocator
 	if config.HybridOverlay.Enabled {
 		hybridOverlaySubnetAllocator = subnetallocator.NewSubnetAllocator()
@@ -325,6 +329,7 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 		sbClient:                  libovsdbOvnSBClient,
 		svcController:             svcController,
 		svcFactory:                svcFactory,
+		egressSvcController:       egressSvcController,
 		podRecorder:               metrics.NewPodRecorder(),
 	}
 }
@@ -434,6 +439,12 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 			oc.runEgressQoSController(1, oc.stopChan)
 		}()
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		oc.egressSvcController.Run(1)
+	}()
 
 	klog.Infof("Completing all the Watchers took %v", time.Since(start))
 
@@ -826,4 +837,26 @@ func (oc *Controller) StartServiceController(wg *sync.WaitGroup, runRepair bool)
 		}
 	}()
 	return nil
+}
+
+func newEgressServiceController(client clientset.Interface, nbClient libovsdbclient.Client,
+	svcFactory informers.SharedInformerFactory, stopCh <-chan struct{}) *egresssvc.Controller {
+
+	// If the EgressIP controller is enabled it will take care of creating the
+	// "no reroute" policies - we can pass "noop" functions to the egress service controller.
+	initClusterEgressPolicies := func(libovsdbclient.Client) error { return nil }
+	createNodeNoReroutePolicies := func(libovsdbclient.Client, *kapi.Node) error { return nil }
+	deleteNodeNoReroutePolicies := func(libovsdbclient.Client, string) error { return nil }
+
+	if !config.OVNKubernetesFeature.EnableEgressIP {
+		initClusterEgressPolicies = InitClusterEgressPolicies
+		createNodeNoReroutePolicies = CreateDefaultNoRerouteNodePolicies
+		deleteNodeNoReroutePolicies = DeleteDefaultNoRerouteNodePolicies
+	}
+
+	return egresssvc.NewController(client, nbClient,
+		initClusterEgressPolicies, createNodeNoReroutePolicies, deleteNodeNoReroutePolicies,
+		stopCh, svcFactory.Core().V1().Services(),
+		svcFactory.Discovery().V1().EndpointSlices(),
+		svcFactory.Core().V1().Nodes())
 }
