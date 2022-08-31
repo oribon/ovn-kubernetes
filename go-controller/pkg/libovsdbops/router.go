@@ -275,6 +275,72 @@ func CreateOrUpdateLogicalRouterPolicyWithPredicate(nbClient libovsdbclient.Clie
 	return err
 }
 
+// CreateOrUpdateLogicalRouterPolicyWithPredicateOps looks up a logical
+// router policy from the cache based on a given predicate. If it does not
+// exist, it creates the provided logical router policy. If it does, it
+// updates it. The logical router policy is added to the provided logical
+// router. Returns the corresponding ops
+func CreateOrUpdateLogicalRouterPolicyWithPredicateOps(nbClient libovsdbclient.Client, ops []libovsdb.Operation,
+	routerName string, lrp *nbdb.LogicalRouterPolicy, p logicalRouterPolicyPredicate, fields ...interface{}) ([]libovsdb.Operation, error) {
+	if len(fields) == 0 {
+		fields = onModelUpdatesAllNonDefault()
+	}
+	router := &nbdb.LogicalRouter{
+		Name: routerName,
+	}
+
+	opModels := []operationModel{
+		{
+			Model:          lrp,
+			ModelPredicate: p,
+			OnModelUpdates: fields,
+			DoAfter:        func() { router.Policies = []string{lrp.UUID} },
+			ErrNotFound:    false,
+			BulkOp:         false,
+		},
+		{
+			Model:            router,
+			ModelPredicate:   func(item *nbdb.LogicalRouter) bool { return item.Name == router.Name },
+			OnModelMutations: []interface{}{&router.Policies},
+			ErrNotFound:      true,
+			BulkOp:           false,
+		},
+	}
+
+	m := newModelClient(nbClient)
+	return m.CreateOrUpdateOps(ops, opModels...)
+}
+
+// DeleteLogicalRouterPolicyWithPredicateOps looks up a logical
+// router policy from the cache based on a given predicate and returns the
+// corresponding ops to delete it and remove it from the provided router.
+func DeleteLogicalRouterPolicyWithPredicateOps(nbClient libovsdbclient.Client, ops []libovsdb.Operation, routerName string, p logicalRouterPolicyPredicate) ([]libovsdb.Operation, error) {
+	router := &nbdb.LogicalRouter{
+		Name: routerName,
+	}
+
+	deleted := []*nbdb.LogicalRouterPolicy{}
+	opModels := []operationModel{
+		{
+			ModelPredicate: p,
+			ExistingResult: &deleted,
+			DoAfter:        func() { router.Policies = extractUUIDsFromModels(&deleted) },
+			ErrNotFound:    false,
+			BulkOp:         true,
+		},
+		{
+			Model:            router,
+			ModelPredicate:   func(lr *nbdb.LogicalRouter) bool { return lr.Name == router.Name },
+			OnModelMutations: []interface{}{&router.Policies},
+			ErrNotFound:      true,
+			BulkOp:           false,
+		},
+	}
+
+	m := newModelClient(nbClient)
+	return m.DeleteOps(ops, opModels...)
+}
+
 // DeleteLogicalRouterPoliciesWithPredicate looks up logical router policies
 // from the cache based on a given predicate, deletes them and removes them from
 // the provided logical router
