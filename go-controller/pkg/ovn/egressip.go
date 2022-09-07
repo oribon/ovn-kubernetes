@@ -1,18 +1,15 @@
 package ovn
 
 import (
-	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	ocpcloudnetworkapi "github.com/openshift/api/cloudnetwork/v1"
@@ -40,17 +37,7 @@ import (
 	utilnet "k8s.io/utils/net"
 )
 
-type egressIPDialer interface {
-	dial(ip net.IP, timeout time.Duration) bool
-}
-
-var dialer egressIPDialer = &egressIPDial{}
-
-type healthcheckClientAllocator interface {
-	allocate(nodeName string) healthcheck.EgressIPHealthClient
-}
-
-var hccAllocator healthcheckClientAllocator = &egressIPHealthcheckClientAllocator{}
+var hccAllocator healthcheck.Allocator = healthcheck.NewClientAllocator("EgressIP")
 
 func (oc *Controller) reconcileEgressIP(old, new *egressipv1.EgressIP) (err error) {
 	// Lock the assignment, this is needed because this function can end up
@@ -1218,7 +1205,7 @@ func (oc *Controller) isEgressNodeReachable(egressNode *kapi.Node) bool {
 	oc.eIPC.allocator.Lock()
 	defer oc.eIPC.allocator.Unlock()
 	if eNode, exists := oc.eIPC.allocator.cache[egressNode.Name]; exists {
-		return eNode.isReachable || oc.isReachable(eNode)
+		return eNode.isReachable || hccAllocator.IsReachable(eNode.name)
 	}
 	return false
 }
@@ -1677,6 +1664,14 @@ func (oc *Controller) addEgressNode(nodeName string) error {
 		}
 	}
 	klog.V(5).Infof("Egress node: %s about to be initialized", nodeName)
+	node, err := oc.eIPC.watchFactory.GetNode(nodeName)
+	if err != nil {
+		return err
+	}
+	err = hccAllocator.Allocate(node)
+	if err != nil {
+		return err
+	}
 	// This option will program OVN to start sending GARPs for all external IPS
 	// that the logical switch port has been configured to use. This is
 	// necessary for egress IP because if an egress IP is moved between two
@@ -1692,7 +1687,7 @@ func (oc *Controller) addEgressNode(nodeName string) error {
 		// LB VIPs are not sent, thereby preventing GARP overload.
 		Options: map[string]string{"nat-addresses": "router", "exclude-lb-vips-from-garp": "true"},
 	}
-	err := libovsdbops.UpdateLogicalSwitchPortSetOptions(oc.nbClient, &lsp)
+	err = libovsdbops.UpdateLogicalSwitchPortSetOptions(oc.nbClient, &lsp)
 	if err != nil {
 		errors = append(errors, fmt.Errorf("unable to configure GARP on external logical switch port for egress node: %s, "+
 			"this will result in packet drops during egress IP re-assignment,  err: %v", nodeName, err))
@@ -1791,20 +1786,16 @@ func (oc *Controller) initEgressIPAllocator(node *kapi.Node) (err error) {
 				return fmt.Errorf("unable to use node for egress assignment, err: %v", err)
 			}
 		}
-		nodeSubnets, err := util.ParseNodeHostSubnetAnnotation(node)
+
+		err = hccAllocator.Allocate(node)
 		if err != nil {
-			return fmt.Errorf("failed to parse node %s subnets annotation %v", node.Name, err)
+			return err
 		}
-		mgmtIPs := make([]net.IP, len(nodeSubnets))
-		for i, subnet := range nodeSubnets {
-			mgmtIPs[i] = util.GetNodeManagementIfAddr(subnet).IP
-		}
+
 		oc.eIPC.allocator.cache[node.Name] = &egressNode{
 			name:           node.Name,
 			egressIPConfig: parsedEgressIPConfig,
-			mgmtIPs:        mgmtIPs,
 			allocations:    make(map[string]string),
-			healthClient:   hccAllocator.allocate(node.Name),
 		}
 	}
 	return nil
@@ -1839,7 +1830,7 @@ func (oc *Controller) deleteNodeForEgress(node *v1.Node) error {
 	}
 	oc.eIPC.allocator.Lock()
 	if eNode, exists := oc.eIPC.allocator.cache[node.Name]; exists {
-		eNode.healthClient.Disconnect()
+		hccAllocator.Remove(eNode.name)
 	}
 	delete(oc.eIPC.allocator.cache, node.Name)
 	oc.eIPC.allocator.Unlock()
@@ -1877,10 +1868,10 @@ func InitClusterEgressPolicies(nbClient libovsdbclient.Client) error {
 
 // egressNode is a cache helper used for egress IP assignment, representing an egress node
 type egressNode struct {
-	egressIPConfig     *util.ParsedNodeEgressIPConfiguration
-	mgmtIPs            []net.IP
-	allocations        map[string]string
-	healthClient       healthcheck.EgressIPHealthClient
+	egressIPConfig *util.ParsedNodeEgressIPConfiguration
+	mgmtIPs        []net.IP
+	allocations    map[string]string
+	//healthClient       healthcheck.EgressIPHealthClient
 	isReady            bool
 	isReachable        bool
 	isEgressAssignable bool
@@ -2219,10 +2210,11 @@ func (oc *Controller) checkEgressNodesReachability() {
 func checkEgressNodesReachabilityIterate(oc *Controller) {
 	reAddOrDelete := map[string]bool{}
 	oc.eIPC.allocator.Lock()
+	nodes := hccAllocator.List()
 	for _, eNode := range oc.eIPC.allocator.cache {
 		if eNode.isEgressAssignable && eNode.isReady {
 			wasReachable := eNode.isReachable
-			isReachable := oc.isReachable(eNode)
+			isReachable := nodes[eNode.name]
 			if wasReachable && !isReachable {
 				reAddOrDelete[eNode.name] = true
 			} else if !wasReachable && isReachable {
@@ -2234,7 +2226,7 @@ func checkEgressNodesReachabilityIterate(oc *Controller) {
 			// it accounts for cases where node is not labelled with
 			// egress-assignable, so connection is no longer needed. Calling
 			// this on a already disconnected node is expected to be cheap.
-			eNode.healthClient.Disconnect()
+			hccAllocator.Remove(eNode.name)
 		}
 	}
 	oc.eIPC.allocator.Unlock()
@@ -2252,101 +2244,6 @@ func checkEgressNodesReachabilityIterate(oc *Controller) {
 			}
 		}
 	}
-}
-
-func (oc *Controller) isReachable(node *egressNode) bool {
-	// Check if we need to do node reachability check
-	if oc.eIPC.egressIPTotalTimeout == 0 {
-		return true
-	}
-
-	if oc.eIPC.egressIPNodeHealthCheckPort == 0 {
-		return oc.isReachableLegacy(node)
-	}
-	return oc.isReachableViaGRPC(node, oc.eIPC.egressIPNodeHealthCheckPort)
-}
-
-func (oc *Controller) isReachableLegacy(node *egressNode) bool {
-	var retryTimeOut, initialRetryTimeOut time.Duration
-
-	numMgmtIPs := len(node.mgmtIPs)
-	if numMgmtIPs == 0 {
-		return false
-	}
-
-	switch oc.eIPC.egressIPTotalTimeout {
-	// Check if we need to do node reachability check
-	case 0:
-		return true
-	case 1:
-		// Using time duration for initial retry with 700/numIPs msec and retry of 100/numIPs msec
-		// to ensure total wait time will be in range with the configured value including a sleep of 100msec between attempts.
-		initialRetryTimeOut = time.Duration(700/numMgmtIPs) * time.Millisecond
-		retryTimeOut = time.Duration(100/numMgmtIPs) * time.Millisecond
-	default:
-		// Using time duration for initial retry with 900/numIPs msec
-		// to ensure total wait time will be in range with the configured value including a sleep of 100msec between attempts.
-		initialRetryTimeOut = time.Duration(900/numMgmtIPs) * time.Millisecond
-		retryTimeOut = initialRetryTimeOut
-	}
-
-	timeout := initialRetryTimeOut
-	endTime := time.Now().Add(time.Second * time.Duration(oc.eIPC.egressIPTotalTimeout))
-	for time.Now().Before(endTime) {
-		for _, ip := range node.mgmtIPs {
-			if dialer.dial(ip, timeout) {
-				return true
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-		timeout = retryTimeOut
-	}
-	klog.Errorf("Failed reachability check for %s", node.name)
-	return false
-}
-
-type egressIPDial struct{}
-
-// Blantant copy from: https://github.com/openshift/sdn/blob/master/pkg/network/common/egressip.go#L499-L505
-// Ping a node and return whether or not we think it is online. We do this by trying to
-// open a TCP connection to the "discard" service (port 9); if the node is offline, the
-// attempt will either time out with no response, or else return "no route to host" (and
-// we will return false). If the node is online then we presumably will get a "connection
-// refused" error; but the code below assumes that anything other than timeout or "no
-// route" indicates that the node is online.
-func (e *egressIPDial) dial(ip net.IP, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), "9"), timeout)
-	if conn != nil {
-		conn.Close()
-	}
-	if opErr, ok := err.(*net.OpError); ok {
-		if opErr.Timeout() {
-			return false
-		}
-		if sysErr, ok := opErr.Err.(*os.SyscallError); ok && sysErr.Err == syscall.EHOSTUNREACH {
-			return false
-		}
-	}
-	return true
-}
-
-type egressIPHealthcheckClientAllocator struct{}
-
-func (hccAlloc *egressIPHealthcheckClientAllocator) allocate(nodeName string) healthcheck.EgressIPHealthClient {
-	return healthcheck.NewEgressIPHealthClient(nodeName)
-}
-
-func (oc *Controller) isReachableViaGRPC(node *egressNode, healthCheckPort int) bool {
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Duration(oc.eIPC.egressIPTotalTimeout)*time.Second)
-	defer dialCancel()
-
-	if !node.healthClient.IsConnected() {
-		// gRPC session is not up. Attempt to connect and if that suceeds, we will declare node as reacheable.
-		return node.healthClient.Connect(dialCtx, node.mgmtIPs, healthCheckPort)
-	}
-
-	// gRPC session is already established. Send a probe, which will succeed, or close the session.
-	return node.healthClient.Probe(dialCtx)
 }
 
 func getClusterSubnets() ([]*net.IPNet, []*net.IPNet) {

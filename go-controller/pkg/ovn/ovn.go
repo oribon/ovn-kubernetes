@@ -20,6 +20,7 @@ import (
 	egresssvc "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egress_services"
 	svccontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
@@ -378,6 +379,12 @@ func (oc *Controller) Run(ctx context.Context, wg *sync.WaitGroup) error {
 	if err := oc.WatchNetworkPolicy(); err != nil {
 		return err
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		healthcheck.CheckNodesReachability(oc.eIPC.egressIPNodeHealthCheckPort, oc.eIPC.egressIPTotalTimeout, oc.stopChan)
+	}()
 
 	if config.OVNKubernetesFeature.EnableEgressIP {
 		// This is probably the best starting order for all egress IP handlers.
