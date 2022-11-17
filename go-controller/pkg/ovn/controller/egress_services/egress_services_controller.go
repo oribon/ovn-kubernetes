@@ -8,6 +8,7 @@ import (
 	"time"
 
 	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	egressservicelisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/listers/egressservice/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
@@ -55,6 +56,10 @@ type Controller struct {
 	// When a node is updated we check this map to see if a service can
 	// be allocated on it - if it does we queue the service again.
 	unallocatedServices map[string]labels.Selector
+
+	EgressServiceLister egressservicelisters.EgressServiceLister
+	EgressServiceSynced cache.InformerSynced
+	EgressServiceQueue  workqueue.RateLimitingInterface
 
 	serviceLister  corelisters.ServiceLister
 	servicesSynced cache.InformerSynced

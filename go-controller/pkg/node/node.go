@@ -26,6 +26,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/informer"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/controllers/egressservice"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/controllers/upgrade"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
 	retry "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
@@ -654,6 +655,15 @@ func (n *OvnNode) Start(ctx context.Context) error {
 		if err := config.WriteCNIConfig(); err != nil {
 			return err
 		}
+	}
+
+	if config.OVNKubernetesFeature.EnableEgressService {
+		egressServiceController := egressservice.NewController(n.client, n.stopChan)
+		n.wg.Add(1)
+		go func() {
+			defer n.wg.Done()
+			egressServiceController.Run(1)
+		}()
 	}
 
 	klog.Infof("OVN Kube Node initialized and ready.")
