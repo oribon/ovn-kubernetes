@@ -27,6 +27,7 @@ import (
 	egressfirewallclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
 	egressipclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
 	egressqosclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned"
+	servicefwmarkclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/servicefwmark/v1/apis/clientset/versioned"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 
 	ocpcloudnetworkclientset "github.com/openshift/client-go/cloudnetwork/clientset/versioned"
@@ -41,6 +42,7 @@ type OVNClientset struct {
 	EgressFirewallClient egressfirewallclientset.Interface
 	CloudNetworkClient   ocpcloudnetworkclientset.Interface
 	EgressQoSClient      egressqosclientset.Interface
+	ServiceFWMarkClient  servicefwmarkclientset.Interface
 }
 
 func adjustCommit() string {
@@ -143,6 +145,10 @@ func NewOVNClientset(conf *config.KubernetesConfig) (*OVNClientset, error) {
 	if err != nil {
 		return nil, err
 	}
+	servicefwmarkClientset, err := servicefwmarkclientset.NewForConfig(kconfig)
+	if err != nil {
+		return nil, err
+	}
 
 	return &OVNClientset{
 		KubeClient:           kclientset,
@@ -150,6 +156,7 @@ func NewOVNClientset(conf *config.KubernetesConfig) (*OVNClientset, error) {
 		EgressFirewallClient: egressFirewallClientset,
 		CloudNetworkClient:   cloudNetworkClientset,
 		EgressQoSClient:      egressqosClientset,
+		ServiceFWMarkClient:  servicefwmarkClientset,
 	}, nil
 }
 
