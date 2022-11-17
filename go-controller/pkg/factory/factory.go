@@ -28,6 +28,11 @@ import (
 	egressqosinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions"
 	egressqosinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions/egressqos/v1"
 
+	servicefwmarkapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/servicefwmark/v1"
+	servicefwmarkscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/servicefwmark/v1/apis/clientset/versioned/scheme"
+	servicefwmarkinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/servicefwmark/v1/apis/informers/externalversions"
+	servicefwmarkinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/servicefwmark/v1/apis/informers/externalversions/servicefwmark/v1"
+
 	kapi "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	knet "k8s.io/api/networking/v1"
@@ -53,12 +58,13 @@ type WatchFactory struct {
 	// requirements with atomic accesses
 	handlerCounter uint64
 
-	iFactory         informerfactory.SharedInformerFactory
-	eipFactory       egressipinformerfactory.SharedInformerFactory
-	efFactory        egressfirewallinformerfactory.SharedInformerFactory
-	cpipcFactory     ocpcloudnetworkinformerfactory.SharedInformerFactory
-	egressQoSFactory egressqosinformerfactory.SharedInformerFactory
-	informers        map[reflect.Type]*informer
+	iFactory             informerfactory.SharedInformerFactory
+	eipFactory           egressipinformerfactory.SharedInformerFactory
+	efFactory            egressfirewallinformerfactory.SharedInformerFactory
+	cpipcFactory         ocpcloudnetworkinformerfactory.SharedInformerFactory
+	egressQoSFactory     egressqosinformerfactory.SharedInformerFactory
+	serviceFWMarkFactory servicefwmarkinformerfactory.SharedInformerFactory
+	informers            map[reflect.Type]*informer
 
 	stopChan chan struct{}
 	Wg       sync.WaitGroup
@@ -121,6 +127,7 @@ var (
 	EgressNodeType                        reflect.Type = reflect.TypeOf(&egressNode{})
 	CloudPrivateIPConfigType              reflect.Type = reflect.TypeOf(&ocpcloudnetworkapi.CloudPrivateIPConfig{})
 	EgressQoSType                         reflect.Type = reflect.TypeOf(&egressqosapi.EgressQoS{})
+	ServiceFWMarkType                     reflect.Type = reflect.TypeOf(&servicefwmarkapi.ServiceFWMark{})
 	PeerNamespaceAndPodSelectorType       reflect.Type = reflect.TypeOf(&peerNamespaceAndPodSelector{})
 	PeerPodForNamespaceAndPodSelectorType reflect.Type = reflect.TypeOf(&peerPodForNamespaceAndPodSelector{})
 	PeerNamespaceSelectorType             reflect.Type = reflect.TypeOf(&peerNamespaceSelector{})
@@ -281,6 +288,15 @@ func (wf *WatchFactory) Start() error {
 		}
 	}
 
+	if config.OVNKubernetesFeature.EnableServiceFWMark && wf.serviceFWMarkFactory != nil {
+		wf.serviceFWMarkFactory.Start(wf.stopChan)
+		for oType, synced := range wf.serviceFWMarkFactory.WaitForCacheSync(wf.stopChan) {
+			if !synced {
+				return fmt.Errorf("error in syncing cache for %v informer", oType)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -288,9 +304,14 @@ func (wf *WatchFactory) Start() error {
 // informers to save memory + bandwidth. It is to be used by the node-only process.
 func NewNodeWatchFactory(ovnClientset *util.OVNClientset, nodeName string) (*WatchFactory, error) {
 	wf := &WatchFactory{
-		iFactory:  informerfactory.NewSharedInformerFactory(ovnClientset.KubeClient, resyncInterval),
-		informers: make(map[reflect.Type]*informer),
-		stopChan:  make(chan struct{}),
+		iFactory:             informerfactory.NewSharedInformerFactory(ovnClientset.KubeClient, resyncInterval),
+		serviceFWMarkFactory: servicefwmarkinformerfactory.NewSharedInformerFactory(ovnClientset.ServiceFWMarkClient, resyncInterval),
+		informers:            make(map[reflect.Type]*informer),
+		stopChan:             make(chan struct{}),
+	}
+
+	if err := servicefwmarkapi.AddToScheme(servicefwmarkscheme.Scheme); err != nil {
+		return nil, err
 	}
 	// For Services and Endpoints, pre-populate the shared Informer with one that
 	// has a label selector excluding headless services.
@@ -358,6 +379,13 @@ func NewNodeWatchFactory(ovnClientset *util.OVNClientset, nodeName string) (*Wat
 	wf.informers[NodeType], err = newInformer(NodeType, wf.iFactory.Core().V1().Nodes().Informer())
 	if err != nil {
 		return nil, err
+	}
+
+	if config.OVNKubernetesFeature.EnableServiceFWMark {
+		wf.informers[ServiceFWMarkType], err = newInformer(ServiceFWMarkType, wf.serviceFWMarkFactory.K8s().V1().ServiceFWMarks().Informer())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return wf, nil
@@ -843,6 +871,10 @@ func (wf *WatchFactory) ServiceInformer() cache.SharedIndexInformer {
 
 func (wf *WatchFactory) EgressQoSInformer() egressqosinformer.EgressQoSInformer {
 	return wf.egressQoSFactory.K8s().V1().EgressQoSes()
+}
+
+func (wf *WatchFactory) ServiceFWMarkInformer() servicefwmarkinformer.ServiceFWMarkInformer {
+	return wf.serviceFWMarkFactory.K8s().V1().ServiceFWMarks()
 }
 
 // withServiceNameAndNoHeadlessServiceSelector returns a LabelSelector (added to the

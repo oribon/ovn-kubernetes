@@ -337,6 +337,7 @@ type OVNKubernetesFeatureConfig struct {
 	EgressIPReachabiltyTotalTimeout int  `gcfg:"egressip-reachability-total-timeout"`
 	EnableEgressFirewall            bool `gcfg:"enable-egress-firewall"`
 	EnableEgressQoS                 bool `gcfg:"enable-egress-qos"`
+	EnableServiceFWMark             bool `gcfg:"enable-service-fwmark"`
 	EgressIPNodeHealthCheckPort     int  `gcfg:"egressip-node-healthcheck-port"`
 }
 
