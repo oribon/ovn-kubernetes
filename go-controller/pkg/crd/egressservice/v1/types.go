@@ -55,6 +55,7 @@ type EgressServiceSpec struct {
 
 // EgressServiceStatus defines the observed state of EgressService
 type EgressServiceStatus struct {
+	Host string `json:"host"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
