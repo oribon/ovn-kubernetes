@@ -49,6 +49,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 		config.PrepareTestConfig()
 		// disabling EgressIP to be sure we're creating the no reroute policies ourselves
 		config.OVNKubernetesFeature.EnableEgressIP = false
+		config.OVNKubernetesFeature.EnableEgressService = true
 		_, cidr4, _ := net.ParseCIDR("10.128.0.0/16")
 		_, cidr6, _ := net.ParseCIDR("fe00::/16")
 		config.Default.ClusterSubnets = []config.CIDRNetworkEntry{{cidr4, 24}, {cidr6, 64}}
@@ -279,7 +280,6 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 				)
 
 				fakeOVN.InitAndRunEgressSVCController()
-
 				clusterRouter.Policies = []string{"toKeepLRP1-UUID", "toKeepLRP2-UUID"}
 				expectedDatabaseState := []libovsdbtest.TestData{
 					toKeepLRP1,
@@ -449,6 +449,71 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						return fmt.Errorf("expected node2's labels %v to be equal %v", node2.Labels, expectedLabels)
 					}
 
+					return nil
+				}).ShouldNot(gomega.HaveOccurred())
+
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		})
+
+		ginkgo.It("should delete stale status from EgressServices", func() {
+			app.Action = func(ctx *cli.Context) error {
+				namespaceT := *newNamespace("testns")
+				node1 := nodeFor(node1Name, node1IPv4, node1IPv6, node1IPv4Subnet, node1IPv6Subnet)
+
+				esvc1 := egressserviceapi.EgressService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "testns",
+					},
+					Status: egressserviceapi.EgressServiceStatus{
+						Host: node1Name,
+					},
+				}
+
+				dbSetup := libovsdbtest.TestSetup{
+					NBData: []libovsdbtest.TestData{
+						&nbdb.LogicalRouter{
+							Name: types.OVNClusterRouter,
+							UUID: types.OVNClusterRouter + "-UUID",
+						},
+					},
+				}
+
+				fakeOVN.startWithDBSetup(dbSetup,
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+					&v1.NodeList{
+						Items: []v1.Node{
+							*node1,
+						},
+					},
+					&egressserviceapi.EgressServiceList{
+						Items: []egressserviceapi.EgressService{
+							esvc1,
+						},
+					},
+				)
+
+				fakeOVN.InitAndRunEgressSVCController()
+
+				gomega.Eventually(func() error {
+					es, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), esvc1.Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if es.Status.Host != "" {
+						return fmt.Errorf("expected svc1's host value %s to be empty", es.Status.Host)
+					}
+
+					return nil
 					return nil
 				}).ShouldNot(gomega.HaveOccurred())
 
@@ -1430,7 +1495,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 					},
 				}
 				v4EpSlice.ResourceVersion = "3"
-				v4EpSlice, err = fakeOVN.fakeClient.KubeClient.DiscoveryV1().EndpointSlices("testns").Update(context.TODO(), v4EpSlice, metav1.UpdateOptions{})
+				_, err = fakeOVN.fakeClient.KubeClient.DiscoveryV1().EndpointSlices("testns").Update(context.TODO(), v4EpSlice, metav1.UpdateOptions{})
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				clusterRouter.Policies = []string{}
@@ -1860,11 +1925,12 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 
 				ginkgo.By("modifying the controller's IsReachable func to return false on the first call and true for the second")
 				count := 0
-				fakeOVN.controller.egressSvcController.IsReachable = func(nodeName string, _ []net.IP, _ healthcheck.EgressIPHealthClient) bool {
-					count++
-					return count == 2
-				}
-				fakeOVN.InitAndRunEgressSVCController()
+				fakeOVN.InitAndRunEgressSVCController(func(c *DefaultNetworkController) {
+					c.egressSvcController.IsReachable = func(nodeName string, _ []net.IP, _ healthcheck.EgressIPHealthClient) bool {
+						count++
+						return count == 2
+					}
+				})
 				gomega.Eventually(func() error {
 					es, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), svc1.Name, metav1.GetOptions{})
 					if err != nil {
@@ -1992,8 +2058,12 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 
 })
 
-func (o *FakeOVN) InitAndRunEgressSVCController() {
+func (o *FakeOVN) InitAndRunEgressSVCController(tweak ...func(*DefaultNetworkController)) {
 	o.controller.svcFactory.Start(o.stopChan)
+	o.controller.InitEgressServiceController()
+	for _, t := range tweak {
+		t(o.controller)
+	}
 	o.egressSVCWg.Add(1)
 	go func() {
 		defer o.egressSVCWg.Done()

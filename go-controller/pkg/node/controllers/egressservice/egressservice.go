@@ -5,11 +5,15 @@ import (
 	"sync"
 	"time"
 
+	egressserviceinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/informers/externalversions/egressservice/v1"
 	egressservicelisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/listers/egressservice/v1"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	coreinformers "k8s.io/client-go/informers/core/v1"
+	discoveryinformers "k8s.io/client-go/informers/discovery/v1"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	discoverylisters "k8s.io/client-go/listers/discovery/v1"
@@ -21,10 +25,11 @@ import (
 type Controller struct {
 	client kubernetes.Interface
 	stopCh <-chan struct{}
+	sync.Mutex
 
-	EgressServiceLister egressservicelisters.EgressServiceLister
-	EgressServiceSynced cache.InformerSynced
-	EgressServiceQueue  workqueue.RateLimitingInterface
+	egressServiceLister egressservicelisters.EgressServiceLister
+	egressServiceSynced cache.InformerSynced
+	egressServiceQueue  workqueue.RateLimitingInterface
 
 	serviceLister  corelisters.ServiceLister
 	servicesSynced cache.InformerSynced
@@ -33,11 +38,44 @@ type Controller struct {
 	endpointSlicesSynced cache.InformerSynced
 }
 
-func NewController(client kubernetes.Interface, stopCh <-chan struct{}) *Controller {
+func NewController(client kubernetes.Interface, stopCh <-chan struct{},
+	esInformer egressserviceinformer.EgressServiceInformer,
+	serviceInformer coreinformers.ServiceInformer,
+	endpointSliceInformer discoveryinformers.EndpointSliceInformer) *Controller {
+	klog.Info("Setting up event handlers for Egress Services")
+
 	c := &Controller{
 		client: client,
 		stopCh: stopCh,
 	}
+
+	c.egressServiceLister = esInformer.Lister()
+	c.egressServiceSynced = esInformer.Informer().HasSynced
+	c.egressServiceQueue = workqueue.NewNamedRateLimitingQueue(
+		workqueue.NewItemFastSlowRateLimiter(1*time.Second, 5*time.Second, 5),
+		"egressservices",
+	)
+	esInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.onEgressServiceAdd,
+		UpdateFunc: c.onEgressServiceUpdate,
+		DeleteFunc: c.onEgressServiceDelete,
+	}))
+
+	c.serviceLister = serviceInformer.Lister()
+	c.servicesSynced = serviceInformer.Informer().HasSynced
+	serviceInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.onServiceAdd,
+		UpdateFunc: c.onServiceUpdate,
+		DeleteFunc: c.onServiceDelete,
+	}))
+
+	c.endpointSliceLister = endpointSliceInformer.Lister()
+	c.endpointSlicesSynced = endpointSliceInformer.Informer().HasSynced
+	endpointSliceInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.onEndpointSliceAdd,
+		UpdateFunc: c.onEndpointSliceUpdate,
+		DeleteFunc: c.onEndpointSliceDelete,
+	}))
 
 	return c
 }
@@ -45,18 +83,30 @@ func NewController(client kubernetes.Interface, stopCh <-chan struct{}) *Control
 func (c *Controller) Run(threadiness int) {
 	defer utilruntime.HandleCrash()
 
-	klog.Infof("Starting EgressService Controller")
+	klog.Infof("Starting Egress Services Controller")
 
-	if !cache.WaitForNamedCacheSync("egressservices", c.stopCh, c.EgressServiceSynced) {
+	if !cache.WaitForNamedCacheSync("egressservices", c.stopCh, c.egressServiceSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		klog.Infof("Synchronization failed")
 		return
 	}
 
-	klog.Infof("Repairing EgressServices")
+	if !cache.WaitForNamedCacheSync("egressservices_services", c.stopCh, c.servicesSynced) {
+		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		klog.Infof("Synchronization failed")
+		return
+	}
+
+	if !cache.WaitForNamedCacheSync("egressservices_endpointslices", c.stopCh, c.endpointSlicesSynced) {
+		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		klog.Infof("Synchronization failed")
+		return
+	}
+
+	klog.Infof("Repairing Egress Services")
 	err := c.repair()
 	if err != nil {
-		klog.Errorf("Failed to repair EgressService entries: %v", err)
+		klog.Errorf("Failed to repair Egress Services entries: %v", err)
 	}
 
 	wg := &sync.WaitGroup{}
@@ -73,8 +123,8 @@ func (c *Controller) Run(threadiness int) {
 	// wait until we're told to stop
 	<-c.stopCh
 
-	klog.Infof("Shutting down EgressService controller")
-	c.EgressServiceQueue.ShutDown()
+	klog.Infof("Shutting down Egress Services controller")
+	c.egressServiceQueue.ShutDown()
 
 	wg.Wait()
 }

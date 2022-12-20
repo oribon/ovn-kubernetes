@@ -884,6 +884,12 @@ var OVNK8sFeatureFlags = []cli.Flag{
 		Usage:       "Configure EgressIP node reachability using gRPC on this TCP port.",
 		Destination: &cliConfig.OVNKubernetesFeature.EgressIPNodeHealthCheckPort,
 	},
+	&cli.BoolFlag{
+		Name:        "enable-egress-service",
+		Usage:       "Configure to use EgressService CRD feature with ovn-kubernetes.",
+		Destination: &cliConfig.OVNKubernetesFeature.EnableEgressService,
+		Value:       OVNKubernetesFeature.EnableEgressService,
+	},
 }
 
 // K8sFlags capture Kubernetes-related options

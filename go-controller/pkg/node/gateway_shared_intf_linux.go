@@ -178,10 +178,9 @@ func delAllEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) error {
 }
 
 func shouldConfigureEgressSVC(svc *kapi.Service, npw *nodePortWatcher) bool {
-	svcHost, _ := util.GetEgressSVCHost(svc)
+	svcHost := "" // util.GetEgressSVCHost(svc)
 
-	return util.HasEgressSVCAnnotation(svc) &&
-		svcHost == npw.nodeName &&
+	return svcHost == npw.nodeName &&
 		svc.Spec.Type == kapi.ServiceTypeLoadBalancer &&
-		len(svc.Status.LoadBalancer.Ingress) > 0
+		len(svc.Status.LoadBalancer.Ingress) > 0 // && util.HasEgressSVCAnnotation(svc)
 }

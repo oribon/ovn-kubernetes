@@ -1,7 +1,6 @@
 package egress_services
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -11,7 +10,6 @@ import (
 	libovsdbclient "github.com/ovn-org/libovsdb/client"
 	libovsdb "github.com/ovn-org/libovsdb/ovsdb"
 	egressserviceapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
-	egressserviceclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned"
 	egressserviceinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/informers/externalversions/egressservice/v1"
 	egressservicelisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/listers/egressservice/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
@@ -47,11 +45,11 @@ const (
 
 type Controller struct {
 	client   kubernetes.Interface
-	esClient egressserviceclientset.Clientset
 	nbClient libovsdbclient.Client
 	stopCh   <-chan struct{}
 	sync.Mutex
 
+	setEgressServiceStatus      func(ns, name, host string) error
 	initClusterEgressPolicies   func(client libovsdbclient.Client) error
 	createNoRerouteNodePolicies func(client libovsdbclient.Client, node *corev1.Node) error
 	deleteNoRerouteNodePolicies func(client libovsdbclient.Client, node string) error
@@ -103,6 +101,7 @@ type nodeState struct {
 func NewController(
 	client kubernetes.Interface,
 	nbClient libovsdbclient.Client,
+	setEgressServiceStatus func(ns, name, host string) error,
 	initClusterEgressPolicies func(libovsdbclient.Client) error,
 	createNoRerouteNodePolicies func(client libovsdbclient.Client, node *corev1.Node) error,
 	deleteNoRerouteNodePolicies func(client libovsdbclient.Client, node string) error,
@@ -113,9 +112,11 @@ func NewController(
 	endpointSliceInformer discoveryinformers.EndpointSliceInformer,
 	nodeInformer coreinformers.NodeInformer) *Controller {
 	klog.Info("Setting up event handlers for Egress Services")
+
 	c := &Controller{
 		client:                      client,
 		nbClient:                    nbClient,
+		setEgressServiceStatus:      setEgressServiceStatus,
 		initClusterEgressPolicies:   initClusterEgressPolicies,
 		createNoRerouteNodePolicies: createNoRerouteNodePolicies,
 		deleteNoRerouteNodePolicies: deleteNoRerouteNodePolicies,
@@ -180,19 +181,19 @@ func (c *Controller) Run(threadiness int) {
 		return
 	}
 
-	if !cache.WaitForNamedCacheSync("egressservices", c.stopCh, c.servicesSynced) {
+	if !cache.WaitForNamedCacheSync("egressservices_services", c.stopCh, c.servicesSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		klog.Infof("Synchronization failed")
 		return
 	}
 
-	if !cache.WaitForNamedCacheSync("egressserviceendpointslices", c.stopCh, c.endpointSlicesSynced) {
+	if !cache.WaitForNamedCacheSync("egressservices_endpointslices", c.stopCh, c.endpointSlicesSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		klog.Infof("Synchronization failed")
 		return
 	}
 
-	if !cache.WaitForNamedCacheSync("egressservicenodes", c.stopCh, c.nodesSynced) {
+	if !cache.WaitForNamedCacheSync("egressservices_nodes", c.stopCh, c.nodesSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		klog.Infof("Synchronization failed")
 		return
@@ -585,7 +586,7 @@ func (c *Controller) syncEgressService(key string) error {
 
 	// At this point the EgressService resource != nil
 
-	nodeSelector := &es.Spec.NodeSelector
+	nodeSelector := es.Spec.NodeSelector
 	v4Endpoints, v6Endpoints, epsNodes, err := c.allEndpointsFor(svc)
 	if err != nil {
 		return err
@@ -601,12 +602,10 @@ func (c *Controller) syncEgressService(key string) error {
 		}
 		nodeSelector.MatchExpressions = append(nodeSelector.MatchExpressions, matchEpsNodes)
 	}
-
-	selector, err := metav1.LabelSelectorAsSelector(nodeSelector)
+	selector, err := metav1.LabelSelectorAsSelector(&nodeSelector)
 	if err != nil {
 		return err
 	}
-
 	totalEps := len(v4Endpoints) + len(v6Endpoints)
 
 	// We don't want to select a node for a service without endpoints to not "waste" an
@@ -739,15 +738,7 @@ func (c *Controller) clearServiceResources(key string, svcState *svcState) error
 }
 
 func (c *Controller) setEgressServiceHost(namespace, name, host string) error {
-	es := &egressserviceapi.EgressService{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-		},
-		Status: egressserviceapi.EgressServiceStatus{Host: host},
-	}
-
-	_, err := c.esClient.K8sV1().EgressServices(es.Namespace).UpdateStatus(context.TODO(), es, metav1.UpdateOptions{})
+	err := c.setEgressServiceStatus(namespace, name, host)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
