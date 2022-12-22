@@ -50,7 +50,7 @@ type EgressServiceSpec struct {
 	// +optional
 	// +kubebuilder:validation:Maximum:=2000
 	// +kubebuilder:validation:Minimum:=1000
-	FWMark int `json:"fwmark"`
+	FWMark uint32 `json:"fwmark"`
 }
 
 // EgressServiceStatus defines the observed state of EgressService

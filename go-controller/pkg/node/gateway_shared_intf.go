@@ -76,7 +76,7 @@ type nodePortWatcher struct {
 	// Map of service name to programmed iptables/OF rules
 	serviceInfo           map[ktypes.NamespacedName]*serviceConfig
 	serviceInfoLock       sync.Mutex
-	egressServiceInfo     map[ktypes.NamespacedName]*serviceEps
+	egressServiceInfo     map[ktypes.NamespacedName]*egressServiceConfig
 	egressServiceInfoLock sync.Mutex
 	ofm                   *openflowManager
 	nodeIPManager         *addressManager
@@ -90,9 +90,11 @@ type serviceConfig struct {
 	hasLocalHostNetworkEp bool
 }
 
-type serviceEps struct {
-	v4 sets.String
-	v6 sets.String
+type egressServiceConfig struct {
+	v4Eps  sets.String
+	v6Eps  sets.String
+	cips   sets.String
+	fwmark uint32
 }
 
 type cidrAndFlags struct {
@@ -508,7 +510,7 @@ func delServiceRules(service *kapi.Service, npw *nodePortWatcher) error {
 	return apierrors.NewAggregate(errors)
 }
 
-func serviceUpdateNotNeeded(old, new *kapi.Service) bool {
+func serviceUpdateNotNeeded(old, new *kapi.Service, thisNode string) bool {
 	return reflect.DeepEqual(new.Spec.Ports, old.Spec.Ports) &&
 		reflect.DeepEqual(new.Spec.ExternalIPs, old.Spec.ExternalIPs) &&
 		reflect.DeepEqual(new.Spec.ClusterIP, old.Spec.ClusterIP) &&
@@ -517,8 +519,34 @@ func serviceUpdateNotNeeded(old, new *kapi.Service) bool {
 		reflect.DeepEqual(new.Status.LoadBalancer.Ingress, old.Status.LoadBalancer.Ingress) &&
 		reflect.DeepEqual(new.Spec.ExternalTrafficPolicy, old.Spec.ExternalTrafficPolicy) &&
 		(new.Spec.InternalTrafficPolicy != nil && old.Spec.InternalTrafficPolicy != nil &&
-			reflect.DeepEqual(*new.Spec.InternalTrafficPolicy, *old.Spec.InternalTrafficPolicy)) //&&
-	//!util.EgressSVCHostChanged(old, new)
+			reflect.DeepEqual(*new.Spec.InternalTrafficPolicy, *old.Spec.InternalTrafficPolicy)) &&
+		egressServiceUpdateNotNeeded(old, new, thisNode)
+}
+
+func egressServiceUpdateNotNeeded(old, new *kapi.Service, thisNode string) bool {
+	if thisNode == "" { // called from a npw that doesn't care about egress services
+		return true
+	}
+
+	oldHost, _ := util.GetEgressSVCHost(old)
+	newHost, _ := util.GetEgressSVCHost(new)
+
+	// the egress service is not related to this node
+	if thisNode != oldHost && thisNode != newHost {
+		return true
+	}
+
+	// the egress service moved to this node or to another one from this node
+	if oldHost != newHost {
+		return false
+	}
+
+	// the service belongs to this node and its fwmark changed
+	if util.EgressSVCFWMarkChanged(old, new) {
+		return false
+	}
+
+	return true
 }
 
 // AddService handles configuring shared gateway bridge flows to steer External IP, Node Port, Ingress LB traffic into OVN
@@ -559,7 +587,7 @@ func (npw *nodePortWatcher) UpdateService(old, new *kapi.Service) error {
 	var errors []error
 	name := ktypes.NamespacedName{Namespace: old.Namespace, Name: old.Name}
 
-	if serviceUpdateNotNeeded(old, new) {
+	if serviceUpdateNotNeeded(old, new, npw.nodeName) {
 		klog.V(5).Infof("Skipping service update for: %s as change does not apply to any of .Spec.Ports, "+
 			".Spec.ExternalIP, .Spec.ClusterIP, .Spec.ClusterIPs, .Spec.Type, .Status.LoadBalancer.Ingress, "+
 			".Spec.ExternalTrafficPolicy, .Spec.InternalTrafficPolicy, Egress service host", new.Name)
@@ -701,7 +729,7 @@ func (npw *nodePortWatcher) SyncServices(services []interface{}) error {
 			keepIPTRules = append(keepIPTRules, getGatewayIPTRules(service, hasLocalHostNetworkEp)...)
 		}
 
-		if !npw.dpuMode && shouldConfigureEgressSVC(service, npw) {
+		if !npw.dpuMode && shouldConfigureEgressSVC(service, npw.nodeName) {
 			v4Eps := sets.NewString()
 			v6Eps := sets.NewString()
 
@@ -723,11 +751,15 @@ func (npw *nodePortWatcher) SyncServices(services []interface{}) error {
 					}
 				}
 			}
-
-			keepIPTRules = append(keepIPTRules, egressSVCIPTRulesForEndpoints(service, v4Eps.UnsortedList(), v6Eps.UnsortedList())...)
-
+			conf, err := util.ParseEgressSVCAnnotation(service.Annotations)
+			if err != nil {
+				klog.Errorf("could not parse egress service annotation for %s/%s :%w",
+					service.Namespace, service.Name, err)
+				continue
+			}
+			keepIPTRules = append(keepIPTRules, egressSVCIPTRulesForEndpoints(service, conf.FWMark, v4Eps.UnsortedList(), v6Eps.UnsortedList(), service.Spec.ClusterIPs)...)
 			npw.egressServiceInfoLock.Lock()
-			npw.egressServiceInfo[name] = &serviceEps{v4: v4Eps, v6: v6Eps}
+			npw.egressServiceInfo[name] = &egressServiceConfig{v4Eps: v4Eps, v6Eps: v6Eps, fwmark: conf.FWMark, cips: sets.NewString(service.Spec.ClusterIPs...)}
 			npw.egressServiceInfoLock.Unlock()
 		}
 	}
@@ -741,8 +773,10 @@ func (npw *nodePortWatcher) SyncServices(services []interface{}) error {
 				errors = append(errors, err)
 			}
 		}
-		if err = recreateIPTRules("mangle", iptableITPChain, keepIPTRules); err != nil {
-			errors = append(errors, err)
+		for _, chain := range []string{iptableITPChain, iptableESVCChain} {
+			if err = recreateIPTRules("mangle", chain, keepIPTRules); err != nil {
+				errors = append(errors, err)
+			}
 		}
 	}
 	return apierrors.NewAggregate(errors)
@@ -923,10 +957,10 @@ func (npwipt *nodePortWatcherIptables) AddService(service *kapi.Service) error {
 func (npwipt *nodePortWatcherIptables) UpdateService(old, new *kapi.Service) error {
 	var err error
 	var errors []error
-	if serviceUpdateNotNeeded(old, new) {
+	if serviceUpdateNotNeeded(old, new, "") {
 		klog.V(5).Infof("Skipping service update for: %s as change does not apply to "+
 			"any of .Spec.Ports, .Spec.ExternalIP, .Spec.ClusterIP, .Spec.ClusterIPs,"+
-			" .Spec.Type, .Status.LoadBalancer.Ingress, Egress service annotations", new.Name)
+			" .Spec.Type, .Status.LoadBalancer.Ingress", new.Name)
 		return nil
 	}
 
@@ -1632,7 +1666,7 @@ func newNodePortWatcher(patchPort, gwBridge, gwIntf, nodeName string, ips []*net
 		gwBridge:          gwBridge,
 		nodeName:          nodeName,
 		serviceInfo:       make(map[ktypes.NamespacedName]*serviceConfig),
-		egressServiceInfo: make(map[ktypes.NamespacedName]*serviceEps),
+		egressServiceInfo: make(map[ktypes.NamespacedName]*egressServiceConfig),
 		nodeIPManager:     nodeIPManager,
 		ofm:               ofm,
 		watchFactory:      watchFactory,
