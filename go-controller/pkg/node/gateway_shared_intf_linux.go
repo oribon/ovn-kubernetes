@@ -80,18 +80,27 @@ func delGatewayIptRules(service *kapi.Service, svcHasLocalHostNetEndPnt bool) er
 }
 
 func updateEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) error {
-	if !shouldConfigureEgressSVC(svc, npw) {
+	if !shouldConfigureEgressSVC(svc, npw.nodeName) {
 		return nil
+	}
+	conf, err := util.ParseEgressSVCAnnotation(svc.Annotations)
+	if err != nil {
+		return err
 	}
 
 	npw.egressServiceInfoLock.Lock()
 	defer npw.egressServiceInfoLock.Unlock()
 
 	key := ktypes.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
-	cachedEps := npw.egressServiceInfo[key]
-	if cachedEps == nil {
-		cachedEps = &serviceEps{sets.NewString(), sets.NewString()}
-		npw.egressServiceInfo[key] = cachedEps
+	cachedConf := npw.egressServiceInfo[key]
+	if cachedConf == nil {
+		cachedConf = &egressServiceConfig{
+			v4Eps:  sets.NewString(),
+			v6Eps:  sets.NewString(),
+			fwmark: conf.FWMark,
+			cips:   sets.NewString(),
+		}
+		npw.egressServiceInfo[key] = cachedConf
 	}
 
 	epSlices, err := npw.watchFactory.GetEndpointSlices(svc.Namespace, svc.Name)
@@ -121,32 +130,38 @@ func updateEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) error {
 		}
 	}
 
-	v4ToAdd := v4Eps.Difference(cachedEps.v4).UnsortedList()
-	v6ToAdd := v6Eps.Difference(cachedEps.v6).UnsortedList()
-	v4ToDelete := cachedEps.v4.Difference(v4Eps).UnsortedList()
-	v6ToDelete := cachedEps.v6.Difference(v6Eps).UnsortedList()
+	v4ToAdd := v4Eps.Difference(cachedConf.v4Eps).UnsortedList()
+	v6ToAdd := v6Eps.Difference(cachedConf.v6Eps).UnsortedList()
+	v4ToDelete := cachedConf.v4Eps.Difference(v4Eps).UnsortedList()
+	v6ToDelete := cachedConf.v6Eps.Difference(v6Eps).UnsortedList()
+
+	cips := sets.NewString(svc.Spec.ClusterIPs...)
+	cipsToAdd := cips.Difference(cachedConf.cips).UnsortedList()
+	cipsToDelete := cachedConf.cips.Difference(cips).UnsortedList()
 
 	// Add rules for endpoints without one.
-	addRules := egressSVCIPTRulesForEndpoints(svc, v4ToAdd, v6ToAdd)
+	addRules := egressSVCIPTRulesForEndpoints(svc, cachedConf.fwmark, v4ToAdd, v6ToAdd, cipsToAdd)
 	if err := addIptRules(addRules); err != nil {
 		return fmt.Errorf("failed to add iptables rules for service %s/%s during update: %v",
 			svc.Namespace, svc.Name, err)
 	}
 
 	// Update the cache with the added endpoints.
-	cachedEps.v4.Insert(v4ToAdd...)
-	cachedEps.v6.Insert(v6ToAdd...)
+	cachedConf.v4Eps.Insert(v4ToAdd...)
+	cachedConf.v6Eps.Insert(v6ToAdd...)
+	cachedConf.cips.Insert(cipsToAdd...)
 
 	// Delete rules for endpoints that should not have one.
-	delRules := egressSVCIPTRulesForEndpoints(svc, v4ToDelete, v6ToDelete)
+	delRules := egressSVCIPTRulesForEndpoints(svc, cachedConf.fwmark, v4ToDelete, v6ToDelete, cipsToDelete)
 	if err := delIptRules(delRules); err != nil {
 		return fmt.Errorf("failed to delete iptables rules for service %s/%s during update: %v",
 			svc.Namespace, svc.Name, err)
 	}
 
 	// Update the cache with the deleted endpoints.
-	cachedEps.v4.Delete(v4ToDelete...)
-	cachedEps.v6.Delete(v6ToDelete...)
+	cachedConf.v4Eps.Delete(v4ToDelete...)
+	cachedConf.v6Eps.Delete(v6ToDelete...)
+	cachedConf.cips.Delete(cipsToDelete...)
 	return nil
 }
 
@@ -154,21 +169,16 @@ func delAllEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) error {
 	npw.egressServiceInfoLock.Lock()
 	defer npw.egressServiceInfoLock.Unlock()
 	key := ktypes.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
-	allEps, found := npw.egressServiceInfo[key]
+	cachedConf, found := npw.egressServiceInfo[key]
 	if !found {
 		return nil
 	}
 
-	v4ToDelete := make([]string, len(allEps.v4))
-	v6ToDelete := make([]string, len(allEps.v6))
-	for addr := range allEps.v4 {
-		v4ToDelete = append(v4ToDelete, addr)
-	}
-	for addr := range allEps.v6 {
-		v6ToDelete = append(v6ToDelete, addr)
-	}
+	v4ToDelete := cachedConf.v4Eps.UnsortedList()
+	v6ToDelete := cachedConf.v6Eps.UnsortedList()
+	cipsToDelete := cachedConf.cips.UnsortedList()
 
-	delRules := egressSVCIPTRulesForEndpoints(svc, v4ToDelete, v6ToDelete)
+	delRules := egressSVCIPTRulesForEndpoints(svc, cachedConf.fwmark, v4ToDelete, v6ToDelete, cipsToDelete)
 	if err := delIptRules(delRules); err != nil {
 		return fmt.Errorf("failed to delete iptables rules for service %s/%s: %v", svc.Namespace, svc.Name, err)
 	}
@@ -177,11 +187,11 @@ func delAllEgressSVCIptRules(svc *kapi.Service, npw *nodePortWatcher) error {
 	return nil
 }
 
-func shouldConfigureEgressSVC(svc *kapi.Service, npw *nodePortWatcher) bool {
+func shouldConfigureEgressSVC(svc *kapi.Service, thisNode string) bool {
 	svcHost, _ := util.GetEgressSVCHost(svc)
 
 	return util.HasEgressSVCAnnotation(svc) &&
-		svcHost == npw.nodeName &&
+		svcHost == thisNode &&
 		svc.Spec.Type == kapi.ServiceTypeLoadBalancer &&
 		len(svc.Status.LoadBalancer.Ingress) > 0
 }

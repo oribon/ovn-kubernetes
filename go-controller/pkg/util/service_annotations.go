@@ -16,6 +16,7 @@ const (
 
 type EgressSVCConfig struct {
 	NodeSelector metav1.LabelSelector `json:"nodeSelector,omitempty"`
+	FWMark       uint32               `json:"fwmark,omitempty"`
 }
 
 // ParseEgressSVCAnnotation returns the parsed egress-service annotation.
@@ -66,4 +67,18 @@ func GetEgressSVCHost(svc *kapi.Service) (string, error) {
 // egress-service-host annotation value.
 func EgressSVCHostChanged(oldSVC, newSVC *kapi.Service) bool {
 	return oldSVC.Annotations[EgressSVCHostAnnotation] != newSVC.Annotations[EgressSVCHostAnnotation]
+}
+
+// EgressSVCFWMarkChanged returns true if both services have the same
+// fwmark annotation value.
+func EgressSVCFWMarkChanged(oldSVC, newSVC *kapi.Service) bool {
+	var oldMark, newMark uint32
+	if oldConf, _ := ParseEgressSVCAnnotation(oldSVC.Annotations); oldConf != nil {
+		oldMark = oldConf.FWMark
+	}
+	if newConf, _ := ParseEgressSVCAnnotation(newSVC.Annotations); newConf != nil {
+		newMark = newConf.FWMark
+	}
+
+	return oldMark != newMark
 }

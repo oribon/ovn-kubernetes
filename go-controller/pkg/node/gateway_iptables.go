@@ -25,7 +25,7 @@ const (
 	iptableExternalIPChain = "OVN-KUBE-EXTERNALIP" // called from nat-PREROUTING and nat-OUTPUT
 	iptableETPChain        = "OVN-KUBE-ETP"        // called from nat-PREROUTING only
 	iptableITPChain        = "OVN-KUBE-ITP"        // called from mangle-OUTPUT and nat-OUTPUT
-	iptableESVCChain       = "OVN-KUBE-EGRESS-SVC" // called from nat-POSTROUTING
+	iptableESVCChain       = "OVN-KUBE-EGRESS-SVC" // called from nat-POSTROUTING and mangle-PREROUTING
 )
 
 func clusterIPTablesProtocols() []iptables.Protocol {
@@ -118,6 +118,12 @@ func getGatewayInitRules(chain string, proto iptables.Protocol) []iptRule {
 			{
 				table:    "nat",
 				chain:    "POSTROUTING",
+				args:     []string{"-j", chain},
+				protocol: proto,
+			},
+			{
+				table:    "mangle",
+				chain:    "PREROUTING",
 				args:     []string{"-j", chain},
 				protocol: proto,
 			},
@@ -375,7 +381,7 @@ func handleGatewayIPTables(iptCallback func(rules []iptRule) error, genGatewayCh
 				return err
 			}
 			addChaintoTable(ipt, "nat", chain)
-			if chain == iptableITPChain {
+			if chain == iptableITPChain || chain == iptableESVCChain {
 				addChaintoTable(ipt, "mangle", chain)
 			}
 			rules = append(rules, genGatewayChainRules(chain, proto)...)
@@ -508,11 +514,54 @@ func getGatewayIPTRules(service *kapi.Service, svcHasLocalHostNetEndPnt bool) []
 	return rules
 }
 
-// Returns all of the SNAT rules that should be created for an egress service with the given endpoints.
-func egressSVCIPTRulesForEndpoints(svc *kapi.Service, v4Eps, v6Eps []string) []iptRule {
+// Returns all of the SNAT rules that should be created for an egress service with the given endpoints and fwmark.
+func egressSVCIPTRulesForEndpoints(svc *kapi.Service, fwmark uint32, v4Eps, v6Eps, cips []string) []iptRule {
 	rules := []iptRule{}
-
 	comment, _ := cache.MetaNamespaceKeyFunc(svc)
+
+	if fwmark != 0 {
+		for _, cip := range cips {
+			proto := getIPTablesProtocol(cip)
+			rules = append(rules, iptRule{
+				table: "mangle",
+				chain: iptableESVCChain,
+				args: []string{
+					"-s", cip,
+					"-m", "comment", "--comment", comment,
+					"-j", "MARK",
+					"--set-mark", fmt.Sprintf("%d", fwmark),
+				},
+				protocol: proto,
+			})
+		}
+		for _, ep := range v4Eps {
+			rules = append(rules, iptRule{
+				table: "mangle",
+				chain: iptableESVCChain,
+				args: []string{
+					"-s", ep,
+					"-m", "comment", "--comment", comment,
+					"-j", "MARK",
+					"--set-mark", fmt.Sprintf("%d", fwmark),
+				},
+				protocol: iptables.ProtocolIPv4,
+			})
+		}
+		for _, ep := range v6Eps {
+			rules = append(rules, iptRule{
+				table: "mangle",
+				chain: iptableESVCChain,
+				args: []string{
+					"-s", ep,
+					"-m", "comment", "--comment", comment,
+					"-j", "MARK",
+					"--set-mark", fmt.Sprintf("%d", fwmark),
+				},
+				protocol: iptables.ProtocolIPv6,
+			})
+		}
+	}
+
 	for _, lb := range svc.Status.LoadBalancer.Ingress {
 		lbIPStr := utilnet.ParseIPSloppy(lb.IP).String()
 		lbProto := getIPTablesProtocol(lbIPStr)

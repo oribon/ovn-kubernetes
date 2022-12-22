@@ -34,6 +34,18 @@ func TestParseEgressSVCAnnotation(t *testing.T) {
 			},
 		},
 		{
+			desc: "valid annotation with fwmark should work",
+			annotations: map[string]string{
+				"k8s.ovn.org/egress-service": "{\"fwmark\":100}",
+			},
+		},
+		{
+			desc: "valid annotation with a nodeSelector and fwmark should work",
+			annotations: map[string]string{
+				"k8s.ovn.org/egress-service": "{\"nodeSelector\":{\"matchLabels\":{\"happy\": \"true\"}}, \"fwmark\": 100}",
+			},
+		},
+		{
 			desc:        "missing annotation should fail",
 			annotations: nil,
 			errMatch:    fmt.Errorf("k8s.ovn.org/egress-service annotation not found"),
@@ -58,6 +70,27 @@ func TestParseEgressSVCAnnotation(t *testing.T) {
 				"k8s.ovn.org/egress-service": "{\"nodeSelector\":{\"matchExpressions\":[{\"key\": \"sad\",\"operator\": \"rainy\",\"values\":[\"true\"]}]}}",
 			},
 			errMatch: fmt.Errorf("failed to parse the nodeSelector"),
+		},
+		{
+			desc: "invalid fwmark (string) should fail",
+			annotations: map[string]string{
+				"k8s.ovn.org/egress-service": "{\"fwmark\":hi}",
+			},
+			errMatch: fmt.Errorf("failed to unmarshal egress svc config annotation value"),
+		},
+		{
+			desc: "invalid fwmark (negative) should fail",
+			annotations: map[string]string{
+				"k8s.ovn.org/egress-service": "{\"fwmark\":-5}",
+			},
+			errMatch: fmt.Errorf("failed to unmarshal egress svc config annotation value"),
+		},
+		{
+			desc: "invalid fwmark (overflow) should fail",
+			annotations: map[string]string{
+				"k8s.ovn.org/egress-service": "{\"fwmark\":4294967296}",
+			},
+			errMatch: fmt.Errorf("failed to unmarshal egress svc config annotation value"),
 		},
 	}
 	for i, tc := range tests {
