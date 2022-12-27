@@ -875,6 +875,10 @@ func (wf *WatchFactory) ServiceInformer() cache.SharedIndexInformer {
 	return wf.informers[ServiceType].inf
 }
 
+func (wf *WatchFactory) EndpointSliceInformer() cache.SharedIndexInformer {
+	return wf.informers[EndpointSliceType].inf
+}
+
 func (wf *WatchFactory) EgressQoSInformer() egressqosinformer.EgressQoSInformer {
 	return wf.egressQoSFactory.K8s().V1().EgressQoSes()
 }

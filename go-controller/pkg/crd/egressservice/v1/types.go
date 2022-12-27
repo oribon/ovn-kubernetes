@@ -41,7 +41,7 @@ type EgressService struct {
 type EgressServiceSpec struct {
 	// NodeSelector is ...
 	// +optional
-	NodeSelector metav1.LabelSelector `json:"podSelector,omitempty"`
+	NodeSelector metav1.LabelSelector `json:"nodeSelector,omitempty"`
 
 	// The fwmark value to set for the service's traffic.
 	// This is applied on the egress traffic of the Service's endpoints

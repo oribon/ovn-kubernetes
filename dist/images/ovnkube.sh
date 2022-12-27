@@ -1133,6 +1133,11 @@ ovn-node() {
       egressip_healthcheck_port_flag="--egressip-node-healthcheck-port=${ovn_egress_ip_healthcheck_port}"
   fi
 
+  egressservice_enabled_flag=
+  if [[ ${ovn_egressservice_enable} == "true" ]]; then
+	  egressservice_enabled_flag="--enable-egress-service"
+  fi
+
   disable_ovn_iface_id_ver_flag=
   if [[ ${ovn_disable_ovn_iface_id_ver} == "true" ]]; then
       disable_ovn_iface_id_ver_flag="--disable-ovn-iface-id-ver"
@@ -1287,6 +1292,7 @@ ovn-node() {
     ${multicast_enabled_flag} \
     ${egressip_enabled_flag} \
     ${egressip_healthcheck_port_flag} \
+    ${egressservice_enabled_flag} \
     ${disable_ovn_iface_id_ver_flag} \
     ${netflow_targets} \
     ${sflow_targets} \

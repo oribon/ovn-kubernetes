@@ -43,10 +43,11 @@ spec:
                   is applied on the egress traffic of the Service's endpoints and
                   on return traffic for when an endpoint replies to an external client
                   calling the Service.
+                format: int32
                 maximum: 2000
                 minimum: 1000
                 type: integer
-              podSelector:
+              nodeSelector:
                 description: NodeSelector is ...
                 properties:
                   matchExpressions:

@@ -28,6 +28,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/controllers/egressservice"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/controllers/upgrade"
+	nodeipt "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/iptables"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
 	retry "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
@@ -394,14 +395,12 @@ func (n *OvnNode) Start(ctx context.Context) error {
 	var isOvnUpEnabled bool
 
 	klog.Infof("OVN Kube Node initialization, Mode: %s", config.OvnKubeNode.Mode)
-
 	// Setting debug log level during node bring up to expose bring up process.
 	// Log level is returned to configured value when bring up is complete.
 	var level klog.Level
 	if err := level.Set("5"); err != nil {
 		klog.Errorf("Setting klog \"loglevel\" to 5 failed, err: %v", err)
 	}
-
 	// Start and sync the watch factory to begin listening for events
 	if err := n.watchFactory.Start(); err != nil {
 		return err
@@ -657,8 +656,11 @@ func (n *OvnNode) Start(ctx context.Context) error {
 		}
 	}
 
+	fmt.Println("ORI hi")
 	if config.OVNKubernetesFeature.EnableEgressService {
-		egressServiceController := egressservice.NewController(n.client, n.stopChan)
+		wf := n.watchFactory.(*factory.WatchFactory)
+		egressServiceController := egressservice.NewController(n.client, n.stopChan, n.name,
+			wf.EgressServiceInformer(), wf.ServiceInformer(), wf.EndpointSliceInformer())
 		n.wg.Add(1)
 		go func() {
 			defer n.wg.Done()
@@ -927,7 +929,7 @@ func upgradeServiceRoute(bridgeName string) error {
 			klog.Errorf("Failed to LocalGatewayNATRules: %v", err)
 		}
 		rules := getLocalGatewayNATRules(types.LocalnetGatewayNextHopPort, IPNet)
-		if err := delIptRules(rules); err != nil {
+		if err := nodeipt.DelRules(rules); err != nil {
 			klog.Errorf("Failed to LocalGatewayNATRules: %v", err)
 		}
 	}
