@@ -83,5 +83,5 @@ func (c *Controller) queueServiceForEndpointSlice(endpointSlice *discovery.Endpo
 		return // we queue a service only if it's in the local caches
 	}
 
-	c.servicesQueue.Add(key)
+	c.egressServiceQueue.Add(key)
 }
