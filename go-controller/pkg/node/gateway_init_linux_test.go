@@ -327,14 +327,18 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 				"OVN-KUBE-SNAT-MGMTPORT": []string{},
 				"OVN-KUBE-ETP":           []string{},
 				"OVN-KUBE-ITP":           []string{},
-				"OVN-KUBE-EGRESS-SVC":    []string{"-m mark --mark 0x3f0 -m comment --comment Do not SNAT to SVC VIP -j RETURN"},
+				"OVN-KUBE-EGRESS-SVC":    []string{},
 			},
 			"filter": {},
 			"mangle": {
 				"OUTPUT": []string{
 					"-j OVN-KUBE-ITP",
 				},
-				"OVN-KUBE-ITP": []string{},
+				"PREROUTING": []string{
+					"-j OVN-KUBE-EGRESS-SVC",
+				},
+				"OVN-KUBE-ITP":        []string{},
+				"OVN-KUBE-EGRESS-SVC": []string{},
 			},
 		}
 		f4 := iptV4.(*util.FakeIPTables)
@@ -1032,7 +1036,7 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`,
 				"OVN-KUBE-SNAT-MGMTPORT": []string{},
 				"OVN-KUBE-ETP":           []string{},
 				"OVN-KUBE-ITP":           []string{},
-				"OVN-KUBE-EGRESS-SVC":    []string{"-m mark --mark 0x3f0 -m comment --comment Do not SNAT to SVC VIP -j RETURN"},
+				"OVN-KUBE-EGRESS-SVC":    []string{},
 			},
 			"filter": {
 				"FORWARD": []string{
@@ -1047,7 +1051,11 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`,
 				"OUTPUT": []string{
 					"-j OVN-KUBE-ITP",
 				},
-				"OVN-KUBE-ITP": []string{},
+				"PREROUTING": []string{
+					"-j OVN-KUBE-EGRESS-SVC",
+				},
+				"OVN-KUBE-ITP":        []string{},
+				"OVN-KUBE-EGRESS-SVC": []string{},
 			},
 		}
 		f4 := iptV4.(*util.FakeIPTables)
