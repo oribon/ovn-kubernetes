@@ -5,7 +5,6 @@ import (
 	"net"
 	"sync"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube/healthcheck"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
@@ -191,16 +190,6 @@ func hasLocalHostNetworkEndpoints(epSlices []*discovery.EndpointSlice, nodeAddre
 		}
 	}
 	return false
-}
-
-// isHostEndpoint determines if the given endpoint ip belongs to a host networked pod
-func isHostEndpoint(endpointIP string) bool {
-	for _, clusterNet := range config.Default.ClusterSubnets {
-		if clusterNet.CIDR.Contains(net.ParseIP(endpointIP)) {
-			return false
-		}
-	}
-	return true
 }
 
 func serviceNamespacedNameFromEndpointSlice(epSlice *discovery.EndpointSlice) (ktypes.NamespacedName, error) {
