@@ -222,7 +222,7 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 		err = wf.Start()
 		Expect(err).NotTo(HaveOccurred())
 
-		k := &kube.Kube{fakeClient.KubeClient, egressIPFakeClient, egressFirewallFakeClient, nil}
+		k := &kube.Kube{fakeClient.KubeClient, egressIPFakeClient, egressFirewallFakeClient, nil, nil}
 
 		iptV4, iptV6 := util.SetFakeIPTablesHelpers()
 
@@ -335,7 +335,11 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 				"OUTPUT": []string{
 					"-j OVN-KUBE-ITP",
 				},
-				"OVN-KUBE-ITP": []string{},
+				"PREROUTING": []string{
+					"-j OVN-KUBE-EGRESS-SVC",
+				},
+				"OVN-KUBE-ITP":        []string{},
+				"OVN-KUBE-EGRESS-SVC": []string{},
 			},
 		}
 		f4 := iptV4.(*util.FakeIPTables)
@@ -554,7 +558,7 @@ func shareGatewayInterfaceDPUTest(app *cli.App, testNS ns.NetNS,
 		err = wf.Start()
 		Expect(err).NotTo(HaveOccurred())
 
-		k := &kube.Kube{fakeClient.KubeClient, egressIPFakeClient, egressFirewallFakeClient, nil}
+		k := &kube.Kube{fakeClient.KubeClient, egressIPFakeClient, egressFirewallFakeClient, nil, nil}
 
 		nodeAnnotator := kube.NewNodeAnnotator(k, existingNode.Name)
 
@@ -948,7 +952,7 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`,
 		err = wf.Start()
 		Expect(err).NotTo(HaveOccurred())
 
-		k := &kube.Kube{fakeClient.KubeClient, egressIPFakeClient, egressFirewallFakeClient, nil}
+		k := &kube.Kube{fakeClient.KubeClient, egressIPFakeClient, egressFirewallFakeClient, nil, nil}
 
 		iptV4, iptV6 := util.SetFakeIPTablesHelpers()
 
@@ -1052,7 +1056,11 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`,
 				"OUTPUT": []string{
 					"-j OVN-KUBE-ITP",
 				},
-				"OVN-KUBE-ITP": []string{},
+				"PREROUTING": []string{
+					"-j OVN-KUBE-EGRESS-SVC",
+				},
+				"OVN-KUBE-ITP":        []string{},
+				"OVN-KUBE-EGRESS-SVC": []string{},
 			},
 		}
 		f4 := iptV4.(*util.FakeIPTables)

@@ -106,7 +106,7 @@ var _ = Describe("Node IP Handler tests", func() {
 			},
 		}
 
-		k := &kube.Kube{tc.fakeClient, nil, nil, nil}
+		k := &kube.Kube{tc.fakeClient, nil, nil, nil, nil}
 		tc.ipManager = newAddressManagerInternal(nodeName, k, fakeMgmtPortConfig, tc.watchFactory, false)
 
 		// We need to wait until the ipManager's goroutine runs the subscribe
