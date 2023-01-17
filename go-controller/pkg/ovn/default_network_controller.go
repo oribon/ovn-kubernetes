@@ -161,7 +161,6 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 		addressSetFactory = addressset.NewOvnAddressSetFactory(cnci.nbClient)
 	}
 	svcController, svcFactory := newServiceController(cnci.client, cnci.nbClient, cnci.recorder)
-	egressSvcController := newEgressServiceController(cnci.client, cnci.nbClient, addressSetFactory, svcFactory, defaultStopChan)
 	var hybridOverlaySubnetAllocator *subnetallocator.HostSubnetAllocator
 	if config.HybridOverlay.Enabled {
 		hybridOverlaySubnetAllocator = subnetallocator.NewHostSubnetAllocator()
@@ -204,7 +203,6 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 		joinSwIPManager:          nil,
 		svcController:            svcController,
 		svcFactory:               svcFactory,
-		egressSvcController:      egressSvcController,
 	}
 
 	oc.initRetryFramework()
@@ -451,11 +449,14 @@ func (oc *DefaultNetworkController) Run(ctx context.Context) error {
 		}()
 	}
 
-	oc.wg.Add(1)
-	go func() {
-		defer oc.wg.Done()
-		oc.egressSvcController.Run(1)
-	}()
+	if config.OVNKubernetesFeature.EnableEgressService {
+		oc.InitEgressServiceController()
+		oc.wg.Add(1)
+		go func() {
+			defer oc.wg.Done()
+			oc.egressSvcController.Run(1)
+		}()
+	}
 
 	klog.Infof("Completing all the Watchers took %v", time.Since(start))
 

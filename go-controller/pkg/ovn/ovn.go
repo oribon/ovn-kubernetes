@@ -434,9 +434,7 @@ func (oc *DefaultNetworkController) StartServiceController(wg *sync.WaitGroup, r
 	return nil
 }
 
-func newEgressServiceController(client clientset.Interface, nbClient libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
-	svcFactory informers.SharedInformerFactory, stopCh <-chan struct{}) *egresssvc.Controller {
-
+func (oc *DefaultNetworkController) InitEgressServiceController() {
 	// If the EgressIP controller is enabled it will take care of creating the
 	// "no reroute" policies - we can pass "noop" functions to the egress service controller.
 	initClusterEgressPolicies := func(libovsdbclient.Client, addressset.AddressSetFactory) error { return nil }
@@ -470,10 +468,10 @@ func newEgressServiceController(client clientset.Interface, nbClient libovsdbcli
 		return isReachableViaGRPC(mgmtIPs, healthClient, hcPort, timeout)
 	}
 
-	return egresssvc.NewController(client, nbClient, addressSetFactory,
-		initClusterEgressPolicies, createNodeNoReroutePolicies,
-		deleteNodeNoReroutePolicies, deleteLegacyDefaultNoRerouteNodePolicies, isReachable,
-		stopCh, svcFactory.Core().V1().Services(),
-		svcFactory.Discovery().V1().EndpointSlices(),
-		svcFactory.Core().V1().Nodes())
+	oc.egressSvcController = egresssvc.NewController(oc.client, oc.nbClient, oc.addressSetFactory,
+		initClusterEgressPolicies, createNodeNoReroutePolicies, deleteNodeNoReroutePolicies, deleteLegacyDefaultNoRerouteNodePolicies, oc.kube.UpdateEgressServiceStatus,
+		isReachable,
+		oc.stopChan, oc.watchFactory.EgressServiceInformer(), oc.svcFactory.Core().V1().Services(),
+		oc.svcFactory.Discovery().V1().EndpointSlices(),
+		oc.svcFactory.Core().V1().Nodes())
 }

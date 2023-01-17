@@ -222,7 +222,7 @@ func (c *Controller) syncNode(key string) error {
 			// the node's labels can be allocated to it.
 			for svcKey, selector := range c.unallocatedServices {
 				if selector.Matches(labels.Set(nodeLabels)) {
-					c.servicesQueue.Add(svcKey)
+					c.egressServiceQueue.Add(svcKey)
 				}
 			}
 		}
@@ -284,7 +284,7 @@ func (c *Controller) syncNode(key string) error {
 	// If it does, we queue that service to attempt allocating it to this node.
 	for svcKey, selector := range c.unallocatedServices {
 		if selector.Matches(labels.Set(nodeLabels)) {
-			c.servicesQueue.Add(svcKey)
+			c.egressServiceQueue.Add(svcKey)
 		}
 	}
 
@@ -364,7 +364,7 @@ func (c *Controller) removeNodeServiceLabel(namespace, name, node string) error 
 
 // Returns the 'egress-service.k8s.ovn.org/<svc-namespace>-<svc-name>' key for the given namespace and name of a service.
 func (c *Controller) nodeLabelForService(namespace, name string) string {
-	return fmt.Sprintf("%s/%s-%s", util.EgressSVCLabelPrefix, namespace, name)
+	return fmt.Sprintf("%s/%s-%s", egressSVCLabelPrefix, namespace, name)
 }
 
 // Patches the node's metadata.labels with the given labels.
