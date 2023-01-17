@@ -256,7 +256,7 @@ var _ = ginkgo.Describe("OVN Namespace Operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			nodeAnnotator := kube.NewNodeAnnotator(&kube.KubeOVN{kube.Kube{fakeOvn.fakeClient.KubeClient},
-				fakeOvn.fakeClient.EgressIPClient, fakeOvn.fakeClient.EgressFirewallClient, nil}, testNode.Name)
+				fakeOvn.fakeClient.EgressIPClient, fakeOvn.fakeClient.EgressFirewallClient, nil, nil}, testNode.Name)
 
 			vlanID := uint(1024)
 			l3Config := node1.gatewayConfig(config.GatewayModeShared, vlanID)
