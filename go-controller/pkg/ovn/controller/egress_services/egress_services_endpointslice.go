@@ -61,7 +61,7 @@ func (c *Controller) onEndpointSliceDelete(obj interface{}) {
 }
 
 func (c *Controller) queueServiceForEndpointSlice(endpointSlice *discovery.EndpointSlice) {
-	key, err := services.ServiceControllerKey(endpointSlice)
+	svcKey, err := services.ServiceControllerKey(endpointSlice)
 	if err != nil {
 		// Do not log endpointsSlices missing service labels as errors.
 		// Once the service label is eventually added, we will get this event
@@ -73,15 +73,24 @@ func (c *Controller) queueServiceForEndpointSlice(endpointSlice *discovery.Endpo
 		}
 		return
 	}
+
 	c.Lock()
 	defer c.Unlock()
-	_, cached := c.services[key]
-	_, unallocated := c.unallocatedServices[key]
-	if !cached && !unallocated {
-		klog.V(5).Infof("Ignoring updating %s for endpointslice %s/%s as it is not a known egress service",
-			key, endpointSlice.Namespace, endpointSlice.Name)
-		return // we queue a service only if it's in the local caches
+	state := c.services[svcKey]
+	if state != nil {
+		c.egressServiceQueue.Add(state.egressServiceKey)
+		return
+	}
+	queued := false
+	for esKey, pending := range c.pendingEgressServices {
+		if pending.svcKey == svcKey {
+			c.egressServiceQueue.Add(esKey)
+			queued = true
+		}
 	}
 
-	c.egressServiceQueue.Add(key)
+	if !queued {
+		klog.V(5).Infof("Ignored queuing %s for endpointslice %s/%s as it is not a known egress service",
+			svcKey, endpointSlice.Namespace, endpointSlice.Name)
+	}
 }

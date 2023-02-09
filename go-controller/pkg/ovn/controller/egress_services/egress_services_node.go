@@ -191,8 +191,8 @@ func (c *Controller) syncNode(key string) error {
 			// queuing them to attempt assigning a new node.
 			// Services can't be assigned to a node while it is in draining status.
 			state.draining = true
-			for svcKey, svcState := range state.allocations {
-				if err := c.clearServiceResources(svcKey, svcState); err != nil {
+			for svcKey := range state.allocations {
+				if err := c.clearServiceResources(svcKey); err != nil {
 					return err
 				}
 			}
@@ -220,9 +220,9 @@ func (c *Controller) syncNode(key string) error {
 		if nodeReady {
 			// The node has no allocated services and is ready, this means unallocated services whose labels match
 			// the node's labels can be allocated to it.
-			for svcKey, selector := range c.unallocatedServices {
-				if selector.Matches(labels.Set(nodeLabels)) {
-					c.egressServiceQueue.Add(svcKey)
+			for esKey, pending := range c.pendingEgressServices {
+				if pending.selector.Matches(labels.Set(nodeLabels)) {
+					c.egressServiceQueue.Add(esKey)
 				}
 			}
 		}
@@ -235,8 +235,8 @@ func (c *Controller) syncNode(key string) error {
 		// and attempt reallocating its services, deleting it from our cache
 		// because we don't care about its reachability status until it becomes ready.
 		state.draining = true
-		for svcKey, svcState := range state.allocations {
-			if err := c.clearServiceResources(svcKey, svcState); err != nil {
+		for svcKey := range state.allocations {
+			if err := c.clearServiceResources(svcKey); err != nil {
 				return err
 			}
 		}
@@ -250,8 +250,8 @@ func (c *Controller) syncNode(key string) error {
 		// and attempt reallocating its services similarly to the "n == nil && state != nil" path.
 		// When it is fully drained and reachable again it will be requeued.
 		state.draining = true
-		for svcKey, svcState := range state.allocations {
-			if err := c.clearServiceResources(svcKey, svcState); err != nil {
+		for svcKey := range state.allocations {
+			if err := c.clearServiceResources(svcKey); err != nil {
 				return err
 			}
 		}
@@ -264,7 +264,7 @@ func (c *Controller) syncNode(key string) error {
 	// If a service's selector no longer matches this node we attempt to reallocate it.
 	for svcKey, svcState := range state.allocations {
 		if !svcState.selector.Matches(labels.Set(n.Labels)) || svcState.stale {
-			if err := c.clearServiceResources(svcKey, svcState); err != nil {
+			if err := c.clearServiceResources(svcKey); err != nil {
 				return err
 			}
 		}
@@ -282,9 +282,9 @@ func (c *Controller) syncNode(key string) error {
 
 	// The node might match the selectors of an unallocated service.
 	// If it does, we queue that service to attempt allocating it to this node.
-	for svcKey, selector := range c.unallocatedServices {
-		if selector.Matches(labels.Set(nodeLabels)) {
-			c.egressServiceQueue.Add(svcKey)
+	for esKey, pending := range c.pendingEgressServices {
+		if pending.selector.Matches(labels.Set(nodeLabels)) {
+			c.egressServiceQueue.Add(esKey)
 		}
 	}
 

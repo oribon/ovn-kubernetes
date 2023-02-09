@@ -39,6 +39,9 @@ type EgressService struct {
 
 // EgressServiceSpec defines the desired state of EgressService
 type EgressServiceSpec struct {
+	// The name of the service in the namespace whose behavior should be modified.
+	ServiceName string `json:"serviceName,omitempty"`
+
 	// Allows limiting the nodes that can be selected to handle the service's traffic.
 	// When present only a node whose labels match the specified selectors can be selected
 	// for handling the service's traffic.

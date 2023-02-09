@@ -93,6 +93,10 @@ spec:
                   calling the service. When it is not specified the default routing
                   table of the host is used.
                 type: string
+              serviceName:
+                description: The name of the service in the namespace whose behavior
+                  should be modified.
+                type: string
             type: object
           status:
             description: EgressServiceStatus defines the observed state of EgressService

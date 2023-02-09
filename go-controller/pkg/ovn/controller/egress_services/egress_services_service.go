@@ -12,43 +12,20 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 )
 
 func (c *Controller) onServiceAdd(obj interface{}) {
-	key, err := cache.MetaNamespaceKeyFunc(obj)
-	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
-		return
-	}
-
 	service := obj.(*corev1.Service)
 	// We only care about new LoadBalancer services that have the egress-service config annotation
 	if !util.ServiceTypeHasLoadBalancer(service) || len(service.Status.LoadBalancer.Ingress) == 0 {
 		return
 	}
 
-	es, err := c.egressServiceLister.EgressServices(service.Namespace).Get(service.Name)
-	if err != nil && !apierrors.IsNotFound(err) {
-		// This shouldn't happen, but we queue the service in case we got an unrelated
-		// error when the EgressService exists
-		c.egressServiceQueue.Add(key)
-		return
-	}
-
-	// There is no EgressService resource for this service so we don't queue it
-	if es == nil {
-		return
-	}
-
-	klog.V(4).Infof("Adding egress service %s", key)
-	c.egressServiceQueue.Add(key)
+	c.queueService(service)
 }
 
 func (c *Controller) onServiceUpdate(oldObj, newObj interface{}) {
@@ -66,56 +43,41 @@ func (c *Controller) onServiceUpdate(oldObj, newObj interface{}) {
 		return
 	}
 
-	key, err := cache.MetaNamespaceKeyFunc(newObj)
-	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", newObj, err))
-		return
-	}
-
-	es, err := c.egressServiceLister.EgressServices(newService.Namespace).Get(newService.Name)
-	if err != nil && !apierrors.IsNotFound(err) {
-		// This shouldn't happen, but we queue the service in case we got an unrelated
-		// error when the EgressService exists
-		c.egressServiceQueue.Add(key)
-		return
-	}
-
-	// There is no EgressService resource for this service so we don't queue it
-	if es == nil {
-		return
-	}
-
-	c.egressServiceQueue.Add(key)
+	c.queueService(newService)
 }
 
 func (c *Controller) onServiceDelete(obj interface{}) {
-	key, err := cache.MetaNamespaceKeyFunc(obj)
-	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
-		return
-	}
-
 	service := obj.(*corev1.Service)
 	// We only care about deletions of LoadBalancer services
 	if !util.ServiceTypeHasLoadBalancer(service) {
 		return
 	}
 
-	klog.V(4).Infof("Deleting egress service %s", key)
-	es, err := c.egressServiceLister.EgressServices(service.Namespace).Get(service.Name)
-	if err != nil && !apierrors.IsNotFound(err) {
-		// This shouldn't happen, but we queue the service in case we got an unrelated
-		// error when the EgressService exists
-		c.egressServiceQueue.Add(key)
-		return
+	c.queueService(service)
+}
+
+func (c *Controller) queueService(svc *corev1.Service) error {
+	c.Lock()
+	defer c.Unlock()
+
+	svcKey, err := cache.MetaNamespaceKeyFunc(svc)
+	if err != nil {
+		return err
 	}
 
-	// There is no EgressService resource for this service so we don't queue it
-	if es == nil {
-		return
+	state := c.services[svcKey]
+	if state != nil {
+		c.egressServiceQueue.Add(state.egressServiceKey)
+		return nil
 	}
 
-	c.egressServiceQueue.Add(key)
+	for esKey, pending := range c.pendingEgressServices {
+		if pending.svcKey == svcKey {
+			c.egressServiceQueue.Add(esKey)
+		}
+	}
+
+	return nil
 }
 
 // Returns all of the non-host endpoints for the given service grouped by IPv4/IPv6.
