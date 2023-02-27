@@ -43,9 +43,6 @@ type Controller struct {
 	sync.Mutex
 	returnMark string // packets coming with this mark should not be modified
 	thisNode   string // name of the node we're running on
-	// TODO: make this smarter, currently the fwmarks aren't being reused
-	// if a network "frees" one
-	availableFWMark int32 // available fwmark for a new fwmark-network mapping
 
 	egressServiceLister egressservicelisters.EgressServiceLister
 	egressServiceSynced cache.InformerSynced
@@ -57,8 +54,17 @@ type Controller struct {
 	endpointSliceLister  discoverylisters.EndpointSliceLister
 	endpointSlicesSynced cache.InformerSynced
 
-	services      map[string]*svcState // svc key -> state
-	routingTables map[string]int32     // routing table name -> fwmark
+	services map[string]*svcState // svc key -> state
+
+	// FWMark management
+	availableFWMark int32                // available fwmark for a new fwmark-network mapping
+	networks        map[string]netConfig // network name (corresponds to a routing table) -> fwmark
+	released        sets.Int32           // fwmarks that were previously and freed
+}
+
+type netConfig struct {
+	mark int32
+	svcs sets.String
 }
 
 type svcState struct {
@@ -83,8 +89,9 @@ func NewController(stopCh <-chan struct{}, returnMark, thisNode string,
 		returnMark:      returnMark,
 		thisNode:        thisNode,
 		services:        map[string]*svcState{},
-		routingTables:   map[string]int32{},
 		availableFWMark: firstFWMark,
+		networks:        map[string]netConfig{},
+		released:        sets.NewInt32(),
 	}
 
 	c.egressServiceLister = esInformer.Lister()
@@ -403,6 +410,8 @@ func (c *Controller) syncEgressService(key string) error {
 	}
 
 	// At this point we finished handling the SNAT rules
+	// Now we handle the "Network" part - creating the relevant FWMark rules
+
 	fwmark, err := c.fwmarkForTable(es.Spec.Network)
 	if err != nil {
 		return err
@@ -413,12 +422,19 @@ func (c *Controller) syncEgressService(key string) error {
 		if err != nil {
 			return err
 		}
+
+		err = c.rmServiceFromNetwork(key, cachedState.fwmark)
+		if err != nil {
+			return err
+		}
 	}
 	cachedState.fwmark = fwmark
 
 	if cachedState.fwmark == 0 {
 		return nil
 	}
+
+	c.networks[es.Spec.Network].svcs.Insert(key)
 
 	allEps := v4Eps.Union(v6Eps)
 
@@ -541,6 +557,11 @@ func (c *Controller) clearServiceRules(key string, state *svcState) error {
 		return err
 	}
 
+	err = c.rmServiceFromNetwork(key, state.fwmark)
+	if err != nil {
+		return err
+	}
+
 	delete(c.services, key)
 	c.egressServiceQueue.Add(key)
 
@@ -562,12 +583,16 @@ func (c *Controller) fwmarkForTable(table string) (int32, error) {
 		return 0, nil
 	}
 
-	fwmark, found := c.routingTables[table]
+	net, found := c.networks[table]
 	if found {
-		return fwmark, nil
+		return net.mark, nil
 	}
 
-	fwmark = c.availableFWMark
+	fwmark, found := c.released.PopAny()
+	if !found {
+		fwmark = c.availableFWMark
+	}
+
 	if fwmark > maxFWMark {
 		return 0, fmt.Errorf("could not allocate fwmark for table: %s", table)
 	}
@@ -584,7 +609,7 @@ func (c *Controller) fwmarkForTable(table string) (int32, error) {
 		}
 	}
 
-	c.routingTables[table] = fwmark
+	c.networks[table] = netConfig{mark: fwmark, svcs: sets.NewString()}
 	c.availableFWMark++
 
 	return fwmark, nil
@@ -596,15 +621,71 @@ func (c *Controller) fwmarkForTable(table string) (int32, error) {
 func createIPRule(family string, fwmark int32, table string) error {
 	mark := fmt.Sprintf("%d", fwmark)
 
+	err := delIPRule(family, fwmark)
+	if err != nil {
+		return err
+	}
+
+	stdout, stderr, err := util.RunIP(family, "rule", "add", "prio", mark, "fwmark", mark, "table", table)
+	if err != nil {
+		return fmt.Errorf("could not add rule for table %s - stdout: %s, stderr: %s, err: %v", table, stdout, stderr, err)
+	}
+
+	return nil
+}
+
+func delIPRule(family string, fwmark int32) error {
+	mark := fmt.Sprintf("%d", fwmark)
+
 	stdout, stderr, err := util.RunIP(family, "rule", "del", "prio", mark)
 	if err != nil && !strings.Contains(stderr, "No such file or directory") {
 		return fmt.Errorf("could not delete rule with priority %d - stdout: %s, stderr: %s, err: %v", fwmark, stdout, stderr, err)
 	}
 
-	stdout, stderr, err = util.RunIP(family, "rule", "add", "prio", mark, "fwmark", mark, "table", table)
-	if err != nil {
-		return fmt.Errorf("could not add rule for table %s - stdout: %s, stderr: %s, err: %v", table, stdout, stderr, err)
+	return nil
+}
+
+func (c *Controller) rmServiceFromNetwork(svcKey string, mark int32) error {
+	if mark == 0 {
+		return nil
 	}
+
+	net := ""
+	for netName, cfg := range c.networks {
+		if cfg.mark == mark {
+			net = netName
+			break
+		}
+	}
+
+	if net == "" { // shouldn't happen
+		return nil
+	}
+
+	netCfg, found := c.networks[net]
+	if !found { // shouldn't happen
+		return nil
+	}
+
+	netCfg.svcs.Delete(svcKey)
+	if netCfg.svcs.Len() > 0 {
+		return nil
+	}
+
+	if config.IPv4Mode {
+		if err := delIPRule("-4", netCfg.mark); err != nil {
+			return err
+		}
+	}
+
+	if config.IPv6Mode {
+		if err := delIPRule("-6", netCfg.mark); err != nil {
+			return err
+		}
+	}
+
+	c.released.Insert(netCfg.mark)
+	delete(c.networks, net)
 
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
@@ -199,6 +200,18 @@ var _ = Describe("Egress Service Operations", func() {
 					Cmd: "ip -4 rule add prio 5000 fwmark 5000 table mynetwork",
 					Err: nil,
 				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 rule del prio 5000",
+					Err: nil,
+				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 rule del prio 5000",
+					Err: nil,
+				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 rule add prio 5000 fwmark 5000 table mynetwork",
+					Err: nil,
+				})
 				epPortName := "https"
 				epPortValue := int32(443)
 
@@ -329,6 +342,33 @@ var _ = Describe("Egress Service Operations", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				Eventually(func() error {
+					return f4.MatchState(expectedTables)
+				}).ShouldNot(HaveOccurred())
+
+				ginkgo.By("Recreating the EgressService the rules should recreate using the same fwmark")
+				_, err = fakeOvnNode.fakeClient.EgressServiceClient.K8sV1().EgressServices("namespace1").Create(context.TODO(), &egressService, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				expectedTables = map[string]util.FakeTable{
+					"nat": {
+						"OVN-KUBE-EGRESS-SVC": []string{
+							"-m mark --mark 0x3f0 -m comment --comment Do not SNAT to SVC VIP -j RETURN",
+							"-s 10.128.0.3 -m comment --comment namespace1/service1 -j SNAT --to-source 5.5.5.5",
+						},
+					},
+					"filter": {},
+					"mangle": {
+						"OVN-KUBE-EGRESS-SVC": []string{},
+					},
+				}
+
+				Eventually(func() error {
+					expectedTables["mangle"]["OVN-KUBE-EGRESS-SVC"] = epFirst
+					if f4.MatchState(expectedTables) == nil {
+						return nil
+					}
+
+					expectedTables["mangle"]["OVN-KUBE-EGRESS-SVC"] = cipFirst
 					return f4.MatchState(expectedTables)
 				}).ShouldNot(HaveOccurred())
 
