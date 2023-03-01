@@ -1,7 +1,10 @@
 package egressservice
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -211,28 +214,432 @@ func (c *Controller) Run(threadiness int) {
 }
 
 // Cleanups the tables/chain so the controller starts from a clean state reflecting its empty cache.
-// TODO: only clean the stale rules and update the cache accordingly.
 func (c *Controller) repair() error {
-	for _, proto := range []iptables.Protocol{iptables.ProtocolIPv4, iptables.ProtocolIPv6} {
+	c.Lock()
+	defer c.Unlock()
+
+	// all the current valid egress services keys to their endpoints from the listers.
+	svcKeyToAllV4Endpoints := map[string]sets.String{}
+	svcKeyToAllV6Endpoints := map[string]sets.String{}
+
+	// all the current valid egress services keys to their clusterips
+	svcKeyToCIPs := map[string]sets.String{}
+
+	// fetch all relevant rules, sort by prio, fill gaps into released
+	err := c.repairIPRules()
+	if err != nil {
+		fmt.Println(err)
+		// TODO: log err / return err / ? ...
+	}
+
+	services, _ := c.serviceLister.List(labels.Everything())
+	allServices := map[string]*corev1.Service{}
+	for _, s := range services {
+		key, _ := cache.MetaNamespaceKeyFunc(s)
+		allServices[key] = s
+	}
+
+	egressServices, _ := c.egressServiceLister.List(labels.Everything())
+	for _, es := range egressServices {
+		key, _ := cache.MetaNamespaceKeyFunc(es)
+		svc := allServices[key]
+
+		if svc == nil {
+			continue
+		}
+
+		if !c.shouldConfigureEgressSVC(svc, es.Status.Host) {
+			continue
+		}
+
+		v4, v6, err := c.allEndpointsFor(svc)
+		if err != nil {
+			continue
+		}
+
+		v4LB, v6LB := "", ""
+		for _, ip := range svc.Status.LoadBalancer.Ingress {
+			if utilnet.IsIPv4String(ip.IP) {
+				v4LB = ip.IP
+				continue
+			}
+			v6LB = ip.IP
+		}
+
+		svcKeyToAllV4Endpoints[key] = v4
+		svcKeyToAllV6Endpoints[key] = v6
+
+		cips := sets.NewString()
+		for _, cip := range svc.Spec.ClusterIPs {
+			ip := utilnet.ParseIPSloppy(cip).String()
+			cips.Insert(ip)
+		}
+		svcKeyToCIPs[key] = cips
+
+		state := &svcState{
+			v4LB:      v4LB,
+			v4Eps:     sets.NewString(),
+			v6LB:      v6LB,
+			v6Eps:     sets.NewString(),
+			markedEps: sets.NewString(),
+			stale:     false,
+		}
+
+		c.services[key] = state
+
+		if es.Spec.Network == "" {
+			continue
+		}
+
+		net, found := c.networks[es.Spec.Network]
+		if !found {
+			continue
+		}
+
+		state.fwmark = net.mark
+		c.networks[es.Spec.Network].svcs.Insert(key)
+	}
+
+	return c.repairIPTables(svcKeyToAllV4Endpoints, svcKeyToAllV6Endpoints, svcKeyToCIPs)
+
+	/*
+		for _, proto := range []iptables.Protocol{iptables.ProtocolIPv4, iptables.ProtocolIPv6} {
+			ipt, err := util.GetIPTablesHelper(proto)
+			if err != nil {
+				return err
+			}
+
+			// list chain
+			// parse each line to a new serviceEntry struct (by map args->vals)
+
+			err = ipt.ClearChain("nat", Chain)
+			if err != nil {
+				return err
+			}
+			err = ipt.ClearChain("mangle", Chain)
+			if err != nil {
+				return err
+			}
+
+			err = nodeipt.AddRules(c.defaultReturnRules(proto), true)
+			if err != nil {
+				return err
+			}
+		}*/
+	// return nil
+}
+
+func (c *Controller) repairIPRules() error {
+	type IPRule struct {
+		Priority int32  `json:"priority"`
+		Src      string `json:"src"`
+		FWMark   string `json:"fwmark"`
+		Table    string `json:"table"`
+	}
+
+	parseRules := func(family string) (map[string]int32, error) {
+		tables := map[string]int32{}
+		ipRules := []IPRule{}
+		stdout, stderr, err := util.RunIP(family, "--json", "rule", "show")
+		if err != nil {
+			return nil, fmt.Errorf("could not list ipv4 rules - stdout: %s, stderr: %s, err: %v", stdout, stderr, err)
+		}
+
+		err = json.Unmarshal([]byte(stdout), &ipRules)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, rule := range ipRules {
+			if rule.FWMark == "" {
+				continue
+			}
+
+			parsedFWMark, err := strconv.ParseInt(rule.FWMark, 0, 0)
+			if err != nil {
+				continue
+			}
+			fwmark := int32(parsedFWMark)
+
+			if fwmark > maxFWMark || fwmark < firstFWMark {
+				continue
+			}
+
+			if fwmark != rule.Priority {
+				continue
+			}
+
+			if rule.Src != "all" {
+				continue
+			}
+
+			tables[rule.Table] = fwmark
+		}
+		return tables, nil
+	}
+
+	tables := map[string]int32{}
+
+	v4Tables := map[string]int32{}
+	if config.IPv4Mode {
+		v4Tables, err := parseRules("-4")
+		if err != nil {
+			return err
+		}
+		tables = v4Tables
+	}
+
+	v6Tables := map[string]int32{}
+	if config.IPv6Mode {
+		v6Tables, err := parseRules("-6")
+		if err != nil {
+			return err
+		}
+		tables = v6Tables
+	}
+
+	if config.IPv4Mode && config.IPv6Mode {
+		intersection := map[string]int32{}
+		for table, v4FWMark := range v4Tables {
+			v6FWMark := v6Tables[table]
+			if v4FWMark == v6FWMark {
+				intersection[table] = v4FWMark
+			}
+		}
+		tables = intersection
+
+		// TODO: DELETE STALE/UNSYNCED IP RULES
+	}
+
+	sortedMarks := []int32{}
+	for net, mark := range tables {
+		c.networks[net] = netConfig{
+			mark: mark,
+			svcs: sets.NewString(),
+		}
+		sortedMarks = append(sortedMarks, mark)
+	}
+	sort.Slice(sortedMarks, func(i, j int) bool { return sortedMarks[i] < sortedMarks[j] })
+
+	if len(sortedMarks) == 0 {
+		return nil
+	}
+
+	for i := int32(firstFWMark); i < sortedMarks[0]; i++ {
+		c.released.Insert(i)
+	}
+
+	for i := 0; i < len(sortedMarks)-1; i++ {
+		for j := sortedMarks[i] + 1; j < sortedMarks[i+1]; j++ {
+			c.released.Insert(j)
+		}
+	}
+
+	c.availableFWMark = sortedMarks[len(sortedMarks)-1] + 1
+
+	return nil
+}
+
+func (c *Controller) repairIPTables(svcsToV4Endpoints, svcsToV6Endpoints, svcsToCIPs map[string]sets.String) error {
+	type esvcIPTRule struct {
+		svcKey string
+		ep     string
+		lb     string
+		mark   int32
+	}
+
+	parseIPTRule := func(rule string) (*esvcIPTRule, error) {
+		split := strings.Fields(rule)
+		if len(split)%2 != 0 {
+			return nil, fmt.Errorf("expected rule %s to have an even amount of args", rule)
+		}
+
+		args := map[string]string{}
+		for i := 0; i < len(split); i += 2 {
+			args[split[i]] = split[i+1]
+		}
+
+		svcKey := args["--comment"]
+		ep := args["-s"]
+		lb := args["--to-source"]
+
+		strMark := args["--set-mark"]
+		mark := int32(0)
+		if strMark != "" {
+			parsedFWMark, err := strconv.ParseInt(strMark, 0, 0)
+			if err != nil {
+				return nil, fmt.Errorf("could not parse fwmark for rule %s, err: %w", rule, err)
+			}
+			mark = int32(parsedFWMark)
+		}
+
+		return &esvcIPTRule{svcKey: svcKey, ep: ep, lb: lb, mark: mark}, nil
+	}
+
+	snatRepair := func(proto iptables.Protocol, svcsToEps map[string]sets.String) error {
+		// TODO: !MISSING!: CHECK FIRST RULE IS DENY!
+		firstRule := c.defaultReturnRules(proto, "nat")
+
 		ipt, err := util.GetIPTablesHelper(proto)
 		if err != nil {
 			return err
 		}
 
-		err = ipt.ClearChain("nat", Chain)
-		if err != nil {
-			return err
-		}
-		err = ipt.ClearChain("mangle", Chain)
+		snatRules, err := ipt.List("nat", Chain)
 		if err != nil {
 			return err
 		}
 
-		err = nodeipt.AddRules(c.defaultReturnRules(proto), true)
+		if len(snatRules) == 0 {
+			nodeipt.AddRules([]nodeipt.Rule{firstRule}, true)
+			return nil
+		}
+
+		// TODO: check if first rule matches the "firstRule"
+
+		rulesToDel := []string{}
+		for _, rule := range snatRules {
+			parsed, err := parseIPTRule(rule)
+			if err != nil {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			svcState, found := c.services[parsed.svcKey]
+			if !found {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			lbToCompare := svcState.v4LB
+			epsToCompare := svcState.v4Eps
+			if proto == iptables.ProtocolIPv6 {
+				lbToCompare = svcState.v6LB
+				epsToCompare = svcState.v6Eps
+			}
+
+			if lbToCompare != parsed.lb || !epsToCompare.Has(parsed.ep) {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			epsToCompare.Insert(parsed.ep)
+		}
+
+		for _, rule := range rulesToDel {
+			args := strings.Fields(rule)
+			err := ipt.Delete("nat", Chain, args...)
+			if err != nil {
+				// TODO: klog? / aggregate errors
+			}
+		}
+
+		return nil
+	}
+
+	markRepair := func(proto iptables.Protocol, svcsToEps map[string]sets.String) error {
+		// TODO: !MISSING!: CHECK FIRST RULE IS DENY!
+		firstRule := c.defaultReturnRules(proto, "mangle")
+		ipt, err := util.GetIPTablesHelper(proto)
 		if err != nil {
 			return err
 		}
+
+		markRules, err := ipt.List("mangle", Chain)
+		if err != nil {
+			return err
+		}
+
+		if len(markRules) == 0 {
+			nodeipt.AddRules([]nodeipt.Rule{firstRule}, true)
+			return nil
+		}
+
+		// TODO: check if first rule matches the "firstRule"
+
+		rulesToDel := []string{}
+		for _, rule := range markRules {
+			parsed, err := parseIPTRule(rule)
+			if err != nil {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			svcState, found := c.services[parsed.svcKey]
+			if !found {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			if parsed.mark == 0 {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			epsToCompare := svcState.v4Eps
+			if proto == iptables.ProtocolIPv6 {
+				epsToCompare = svcState.v6Eps
+			}
+
+			if parsed.mark != svcState.fwmark || (!epsToCompare.Has(parsed.ep) && !svcsToCIPs[parsed.svcKey].Has(parsed.ep)) {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			svcState.markedEps.Insert(parsed.ep)
+		}
+
+		for _, rule := range rulesToDel {
+			args := strings.Fields(rule)
+			err := ipt.Delete("nat", Chain, args...)
+			if err != nil {
+				// TODO: klog? / aggregate errors
+			}
+		}
+
+		return nil
 	}
+
+	if config.IPv4Mode {
+		ipt, err := util.GetIPTablesHelper(iptables.ProtocolIPv4)
+		if err != nil {
+			return err
+		}
+
+		ipt.NewChain("nat", Chain)
+		ipt.NewChain("mangle", Chain)
+
+		err = snatRepair(iptables.ProtocolIPv4, svcsToV4Endpoints)
+		if err != nil {
+			// TODO:
+		}
+
+		err = markRepair(iptables.ProtocolIPv4, svcsToV4Endpoints)
+		if err != nil {
+			// TODO:
+		}
+	}
+
+	if config.IPv6Mode {
+		ipt, err := util.GetIPTablesHelper(iptables.ProtocolIPv4)
+		if err != nil {
+			return err
+		}
+
+		ipt.NewChain("nat", Chain)
+		ipt.NewChain("mangle", Chain)
+
+		err = snatRepair(iptables.ProtocolIPv6, svcsToV6Endpoints)
+		if err != nil {
+			// TODO:
+		}
+
+		err = markRepair(iptables.ProtocolIPv6, svcsToV6Endpoints)
+		if err != nil {
+			// TODO:
+		}
+	}
+
 	return nil
 }
 
@@ -728,9 +1135,9 @@ func getIPTablesProtocol(ip string) iptables.Protocol {
 	return iptables.ProtocolIPv4
 }
 
-func (c *Controller) defaultReturnRules(proto iptables.Protocol) []nodeipt.Rule {
-	return []nodeipt.Rule{
-		{
+func (c *Controller) defaultReturnRules(proto iptables.Protocol, table string) nodeipt.Rule {
+	if table == "nat" {
+		return nodeipt.Rule{
 			Table: "nat",
 			Chain: Chain,
 			Args: []string{
@@ -739,8 +1146,12 @@ func (c *Controller) defaultReturnRules(proto iptables.Protocol) []nodeipt.Rule 
 				"-j", "RETURN",
 			},
 			Protocol: proto,
-		},
-		{
+		}
+
+	}
+
+	if table == "mangle" {
+		return nodeipt.Rule{
 			Table: "mangle",
 			Chain: Chain,
 			Args: []string{
@@ -749,6 +1160,8 @@ func (c *Controller) defaultReturnRules(proto iptables.Protocol) []nodeipt.Rule 
 				"-j", "RETURN",
 			},
 			Protocol: proto,
-		},
+		}
 	}
+
+	return nodeipt.Rule{}
 }

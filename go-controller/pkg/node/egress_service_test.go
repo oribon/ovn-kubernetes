@@ -61,6 +61,10 @@ var _ = Describe("Egress Service Operations", func() {
 		It("manages iptables rules for LoadBalancer egress service backed by ovn-k pods", func() {
 			app.Action = func(ctx *cli.Context) error {
 				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 --json rule show",
+					Err: nil,
+				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
 					Cmd: "ovs-ofctl show ",
 					Err: fmt.Errorf("deliberate error to fall back to output:LOCAL"),
 				})
@@ -192,6 +196,11 @@ var _ = Describe("Egress Service Operations", func() {
 
 		It("manages iptables rules for LoadBalancer egress service backed by ovn-k pods with routing table", func() {
 			app.Action = func(ctx *cli.Context) error {
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 --json rule show",
+					Err: nil,
+				})
+
 				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
 					Cmd: "ip -4 rule del prio 5000",
 					Err: nil,
