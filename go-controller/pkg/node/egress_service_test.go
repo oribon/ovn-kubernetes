@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"fmt"
 	"net"
 
 	. "github.com/onsi/ginkgo"
@@ -11,6 +10,7 @@ import (
 	egressserviceapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/controllers/egressservice"
+	nodeipt "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/iptables"
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	util "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/mocks"
@@ -40,7 +40,7 @@ var _ = Describe("Egress Service Operations", func() {
 		app = cli.NewApp()
 		app.Name = "test"
 		app.Flags = config.Flags
-		fExec = ovntest.NewFakeExec()
+		fExec = ovntest.NewLooseCompareFakeExec()
 		fakeOvnNode = NewFakeOVNNode(fExec)
 
 		config.Gateway.Mode = config.GatewayModeShared
@@ -57,16 +57,184 @@ var _ = Describe("Egress Service Operations", func() {
 	})
 
 	Context("on egress service resource changes", func() {
+		It("repairs iptables and ip rules when stale entries are present", func() {
+			app.Action = func(ctx *cli.Context) error {
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd:    "ip -4 --json rule show",
+					Output: "[{\"priority\":5000,\"src\":\"10.128.0.3\",\"table\":\"wrongTable\"},{\"priority\":5000,\"src\":\"goneEp\",\"table\":\"main\"},{\"priority\":5000,\"src\":\"10.128.0.3\",\"table\":\"mynetwork\"},{\"priority\":5000,\"src\":\"10.129.0.2\",\"table\":\"mynetwork\"}]",
+					Err:    nil,
+				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 rule del prio 5000 from 10.128.0.3 table wrongTable",
+					Err: nil,
+				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 rule del prio 5000 from goneEp table main",
+					Err: nil,
+				})
+
+				fakeRules := []nodeipt.Rule{
+					{
+						Table: "nat",
+						Chain: "OVN-KUBE-EGRESS-SVC",
+						Args: []string{
+							"-s", "10.128.0.3",
+							"-m", "comment", "--comment", "namespace1/service1",
+							"-j", "SNAT",
+							"--to-source", "5.5.5.5",
+						},
+						Protocol: getIPTablesProtocol("5.5.5.5"),
+					},
+					{
+						Table: "nat",
+						Chain: "OVN-KUBE-EGRESS-SVC",
+						Args: []string{
+							"-s", "10.128.0.88", // gone ep
+							"-m", "comment", "--comment", "namespace1/service1",
+							"-j", "SNAT",
+							"--to-source", "5.5.5.5",
+						},
+						Protocol: getIPTablesProtocol("5.5.5.5"),
+					},
+					{
+						Table: "nat",
+						Chain: "OVN-KUBE-EGRESS-SVC",
+						Args: []string{
+							"-s", "10.128.0.88",
+							"-m", "comment", "--comment", "namespace1/service1",
+							"-j", "SNAT",
+							"--to-source", "5.200.5.12", // wrong lb
+						},
+						Protocol: getIPTablesProtocol("5.5.5.5"),
+					},
+					{
+						Table: "nat",
+						Chain: "OVN-KUBE-EGRESS-SVC",
+						Args: []string{
+							"-s", "10.128.0.3",
+							"-m", "comment", "--comment", "namespace13service6", // gone service
+							"-j", "SNAT",
+							"--to-source", "1.2.3.4",
+						},
+						Protocol: getIPTablesProtocol("5.5.5.5"),
+					},
+				}
+				Expect(insertIptRules(fakeRules)).To(Succeed())
+
+				epPortName := "https"
+				epPortValue := int32(443)
+
+				egressService := egressserviceapi.EgressService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "service1",
+						Namespace: "namespace1",
+					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						Network: "mynetwork",
+					},
+					Status: egressserviceapi.EgressServiceStatus{
+						Host: fakeNodeName,
+					},
+				}
+				service := *newService("service1", "namespace1", "10.129.0.2",
+					[]v1.ServicePort{
+						{
+							NodePort: int32(31111),
+							Protocol: v1.ProtocolTCP,
+							Port:     int32(8080),
+						},
+					},
+					v1.ServiceTypeLoadBalancer,
+					[]string{},
+					v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{{
+								IP: "5.5.5.5",
+							}},
+						},
+					},
+					false, false,
+				)
+
+				ep1 := discovery.Endpoint{
+					Addresses: []string{"10.128.0.3"},
+				}
+				epPort := discovery.EndpointPort{
+					Name: &epPortName,
+					Port: &epPortValue,
+				}
+
+				// host-networked endpoint, should not have an SNAT rule created
+				ep2 := discovery.Endpoint{
+					Addresses: []string{"192.168.18.15"},
+				}
+				// endpointSlice.Endpoints is ovn-networked so this will
+				// come under !hasLocalHostNetEp case
+				endpointSlice := *newEndpointSlice(
+					"service1",
+					"namespace1",
+					[]discovery.Endpoint{ep1, ep2},
+					[]discovery.EndpointPort{epPort})
+
+				fakeOvnNode.start(ctx,
+					&v1.ServiceList{
+						Items: []v1.Service{
+							service,
+						},
+					},
+					&discovery.EndpointSliceList{
+						Items: []discovery.EndpointSlice{
+							endpointSlice,
+						},
+					},
+					&egressserviceapi.EgressServiceList{
+						Items: []egressserviceapi.EgressService{
+							egressService,
+						},
+					},
+				)
+
+				wf := fakeOvnNode.watcher.(*factory.WatchFactory)
+				c, err := egressservice.NewController(fakeOvnNode.stopChan, ovnKubeNodeSNATMark, fakeOvnNode.nc.name,
+					wf.EgressServiceInformer(), wf.ServiceInformer(), wf.EndpointSliceInformer())
+				Expect(err).ToNot(HaveOccurred())
+				fakeOvnNode.wg.Add(1)
+				go func() {
+					defer fakeOvnNode.wg.Done()
+					c.Run(1)
+				}()
+
+				expectedTables := map[string]util.FakeTable{
+					"nat": {
+						"OVN-KUBE-EGRESS-SVC": []string{
+							"-m mark --mark 0x3f0 -m comment --comment Do not SNAT to SVC VIP -j RETURN",
+							"-s 10.128.0.3 -m comment --comment namespace1/service1 -j SNAT --to-source 5.5.5.5",
+						},
+					},
+					"filter": {},
+					"mangle": {},
+				}
+
+				f4 := iptV4.(*util.FakeIPTables)
+				Eventually(func() error {
+					return f4.MatchState(expectedTables)
+				}).ShouldNot(HaveOccurred())
+
+				Expect(fakeOvnNode.fakeExec.CalledMatchesExpected()).To(BeTrue(), fakeOvnNode.fakeExec.ErrorDesc)
+
+				return nil
+			}
+			err := app.Run([]string{app.Name})
+			Expect(err).NotTo(HaveOccurred())
+		})
 		It("manages iptables rules for LoadBalancer egress service backed by ovn-k pods", func() {
 			app.Action = func(ctx *cli.Context) error {
 				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd: "ovs-ofctl show ",
-					Err: fmt.Errorf("deliberate error to fall back to output:LOCAL"),
+					Cmd:    "ip -4 --json rule show",
+					Output: "[]",
+					Err:    nil,
 				})
-				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd: "ovs-ofctl show ",
-					Err: fmt.Errorf("deliberate error to fall back to output:LOCAL"),
-				})
+
 				epPortName := "https"
 				epPortValue := int32(443)
 
@@ -155,11 +323,7 @@ var _ = Describe("Egress Service Operations", func() {
 						},
 					},
 					"filter": {},
-					"mangle": {
-						"OVN-KUBE-EGRESS-SVC": []string{
-							"-m mark --mark 0x3f0 -m comment --comment Do not mark -j RETURN",
-						},
-					},
+					"mangle": {},
 				}
 
 				f4 := iptV4.(*util.FakeIPTables)
@@ -172,9 +336,7 @@ var _ = Describe("Egress Service Operations", func() {
 						"OVN-KUBE-EGRESS-SVC": []string{"-m mark --mark 0x3f0 -m comment --comment Do not SNAT to SVC VIP -j RETURN"},
 					},
 					"filter": {},
-					"mangle": {
-						"OVN-KUBE-EGRESS-SVC": []string{"-m mark --mark 0x3f0 -m comment --comment Do not mark -j RETURN"},
-					},
+					"mangle": {},
 				}
 
 				err = fakeOvnNode.fakeClient.EgressServiceClient.K8sV1().EgressServices("namespace1").Delete(context.TODO(), "service1", metav1.DeleteOptions{})
@@ -184,20 +346,35 @@ var _ = Describe("Egress Service Operations", func() {
 					return f4.MatchState(expectedTables)
 				}).ShouldNot(HaveOccurred())
 
+				Expect(fakeOvnNode.fakeExec.CalledMatchesExpected()).To(BeTrue(), fakeOvnNode.fakeExec.ErrorDesc)
+
 				return nil
 			}
 			err := app.Run([]string{app.Name})
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("manages iptables rules for LoadBalancer egress service backed by ovn-k pods with routing table", func() {
+		It("AAAA manages iptables rules for LoadBalancer egress service backed by ovn-k pods with routing table", func() {
 			app.Action = func(ctx *cli.Context) error {
 				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd: "ip -4 rule del prio 5000",
+					Cmd:    "ip -4 --json rule show",
+					Output: "[]",
+					Err:    nil,
+				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 rule add prio 5000 from 10.129.0.2 table mynetwork",
 					Err: nil,
 				})
 				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd: "ip -4 rule add prio 5000 fwmark 5000 table mynetwork",
+					Cmd: "ip -4 rule add prio 5000 from 10.128.0.3 table mynetwork",
+					Err: nil,
+				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 rule del prio 5000 from 10.129.0.2 table mynetwork",
+					Err: nil,
+				})
+				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
+					Cmd: "ip -4 rule del prio 5000 from 10.128.0.3 table mynetwork",
 					Err: nil,
 				})
 				epPortName := "https"
@@ -292,28 +469,10 @@ var _ = Describe("Egress Service Operations", func() {
 						},
 					},
 					"filter": {},
-					"mangle": {
-						"OVN-KUBE-EGRESS-SVC": []string{},
-					},
-				}
-				epFirst := []string{
-					"-m mark --mark 0x3f0 -m comment --comment Do not mark -j RETURN",
-					"-s 10.128.0.3 -m comment --comment namespace1/service1 -j MARK --set-mark 5000",
-					"-s 10.129.0.2 -m comment --comment namespace1/service1 -j MARK --set-mark 5000",
-				}
-				cipFirst := []string{
-					"-m mark --mark 0x3f0 -m comment --comment Do not mark -j RETURN",
-					"-s 10.129.0.2 -m comment --comment namespace1/service1 -j MARK --set-mark 5000",
-					"-s 10.128.0.3 -m comment --comment namespace1/service1 -j MARK --set-mark 5000",
+					"mangle": {},
 				}
 				f4 := iptV4.(*util.FakeIPTables)
 				Eventually(func() error {
-					expectedTables["mangle"]["OVN-KUBE-EGRESS-SVC"] = epFirst
-					if f4.MatchState(expectedTables) == nil {
-						return nil
-					}
-
-					expectedTables["mangle"]["OVN-KUBE-EGRESS-SVC"] = cipFirst
 					return f4.MatchState(expectedTables)
 				}).ShouldNot(HaveOccurred())
 
@@ -322,9 +481,7 @@ var _ = Describe("Egress Service Operations", func() {
 						"OVN-KUBE-EGRESS-SVC": []string{"-m mark --mark 0x3f0 -m comment --comment Do not SNAT to SVC VIP -j RETURN"},
 					},
 					"filter": {},
-					"mangle": {
-						"OVN-KUBE-EGRESS-SVC": []string{"-m mark --mark 0x3f0 -m comment --comment Do not mark -j RETURN"},
-					},
+					"mangle": {},
 				}
 
 				err = fakeOvnNode.fakeClient.EgressServiceClient.K8sV1().EgressServices("namespace1").Delete(context.TODO(), "service1", metav1.DeleteOptions{})
@@ -334,6 +491,7 @@ var _ = Describe("Egress Service Operations", func() {
 					return f4.MatchState(expectedTables)
 				}).ShouldNot(HaveOccurred())
 
+				Expect(fakeOvnNode.fakeExec.CalledMatchesExpected()).To(BeTrue(), fakeOvnNode.fakeExec.ErrorDesc)
 				return nil
 			}
 			err := app.Run([]string{app.Name})

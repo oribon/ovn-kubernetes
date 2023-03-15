@@ -69,12 +69,6 @@ func getGatewayInitRules(chain string, proto iptables.Protocol) []nodeipt.Rule {
 				Args:     []string{"-j", chain},
 				Protocol: proto,
 			},
-			{
-				Table:    "mangle",
-				Chain:    "PREROUTING",
-				Args:     []string{"-j", chain},
-				Protocol: proto,
-			},
 		}
 	}
 	if chain == iptableITPChain {
@@ -359,7 +353,7 @@ func handleGatewayIPTables(iptCallback func(rules []nodeipt.Rule) error, genGate
 				return err
 			}
 			addChaintoTable(ipt, "nat", chain)
-			if chain == iptableITPChain || chain == egressservice.Chain {
+			if chain == iptableITPChain {
 				addChaintoTable(ipt, "mangle", chain)
 			}
 			rules = append(rules, genGatewayChainRules(chain, proto)...)

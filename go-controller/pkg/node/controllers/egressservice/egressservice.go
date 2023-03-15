@@ -1,7 +1,9 @@
 package egressservice
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -33,9 +36,8 @@ import (
 )
 
 const (
-	Chain       = "OVN-KUBE-EGRESS-SVC" // called from nat-POSTROUTING and mangle-PREROUTING
-	firstFWMark = 5000
-	maxFWMark   = 7000
+	Chain          = "OVN-KUBE-EGRESS-SVC" // called from nat-POSTROUTING
+	IPRulePriority = 5000                  // the priority of the ip rules created by the controller
 )
 
 type Controller struct {
@@ -43,9 +45,6 @@ type Controller struct {
 	sync.Mutex
 	returnMark string // packets coming with this mark should not be modified
 	thisNode   string // name of the node we're running on
-	// TODO: make this smarter, currently the fwmarks aren't being reused
-	// if a network "frees" one
-	availableFWMark int32 // available fwmark for a new fwmark-network mapping
 
 	egressServiceLister egressservicelisters.EgressServiceLister
 	egressServiceSynced cache.InformerSynced
@@ -57,17 +56,16 @@ type Controller struct {
 	endpointSliceLister  discoverylisters.EndpointSliceLister
 	endpointSlicesSynced cache.InformerSynced
 
-	services      map[string]*svcState // svc key -> state
-	routingTables map[string]int32     // routing table name -> fwmark
+	services map[string]*svcState // svc key -> state
 }
 
 type svcState struct {
-	v4LB      string           // IPv4 ingress of the service
-	v4Eps     sets.Set[string] // v4 endpoints that have an SNAT rule configured
-	v6LB      string           // IPv6 ingress of the service
-	v6Eps     sets.Set[string] // v6 endpoints that have an SNAT rule configured
-	fwmark    int32            // FWMark corresponding to a routing table
-	markedEps sets.Set[string] // All endpoints that have a FWMark rule configured
+	v4LB   string           // IPv4 ingress of the service
+	v4Eps  sets.Set[string] // v4 endpoints that have an SNAT rule configured
+	v6LB   string           // IPv6 ingress of the service
+	v6Eps  sets.Set[string] // v6 endpoints that have an SNAT rule configured
+	net    string           // net corresponding to the spec.Network
+	netEps sets.Set[string] // All endpoints that have an ip rule configured
 
 	stale bool
 }
@@ -79,12 +77,10 @@ func NewController(stopCh <-chan struct{}, returnMark, thisNode string,
 	klog.Info("Setting up event handlers for Egress Services")
 
 	c := &Controller{
-		stopCh:          stopCh,
-		returnMark:      returnMark,
-		thisNode:        thisNode,
-		services:        map[string]*svcState{},
-		routingTables:   map[string]int32{},
-		availableFWMark: firstFWMark,
+		stopCh:     stopCh,
+		returnMark: returnMark,
+		thisNode:   thisNode,
+		services:   map[string]*svcState{},
 	}
 
 	c.egressServiceLister = esInformer.Lister()
@@ -213,29 +209,315 @@ func (c *Controller) Run(threadiness int) {
 }
 
 // Cleanups the tables/chain so the controller starts from a clean state reflecting its empty cache.
-// TODO: only clean the stale rules and update the cache accordingly.
 func (c *Controller) repair() error {
-	for _, proto := range []iptables.Protocol{iptables.ProtocolIPv4, iptables.ProtocolIPv6} {
+	c.Lock()
+	defer c.Unlock()
+
+	// all the current valid egress services keys to their endpoints from the listers.
+	v4EndpointsToSvcKey := map[string]string{}
+	v6EndpointsToSvcKey := map[string]string{}
+
+	// all the current valid egress services keys to their clusterips
+	cipsToSvcKey := map[string]string{}
+
+	services, _ := c.serviceLister.List(labels.Everything())
+	allServices := map[string]*corev1.Service{}
+	for _, s := range services {
+		key, _ := cache.MetaNamespaceKeyFunc(s)
+		allServices[key] = s
+	}
+
+	egressServices, _ := c.egressServiceLister.List(labels.Everything())
+	for _, es := range egressServices {
+		key, _ := cache.MetaNamespaceKeyFunc(es)
+		svc := allServices[key]
+
+		if svc == nil {
+			continue
+		}
+
+		if !c.shouldConfigureEgressSVC(svc, es.Status.Host) {
+			continue
+		}
+
+		v4, v6, err := c.allEndpointsFor(svc)
+		if err != nil {
+			continue
+		}
+
+		for _, ep := range v4.UnsortedList() {
+			v4EndpointsToSvcKey[ep] = key
+		}
+
+		for _, ep := range v6.UnsortedList() {
+			v6EndpointsToSvcKey[ep] = key
+		}
+
+		v4LB, v6LB := "", ""
+		for _, ip := range svc.Status.LoadBalancer.Ingress {
+			if utilnet.IsIPv4String(ip.IP) {
+				v4LB = ip.IP
+				continue
+			}
+			v6LB = ip.IP
+		}
+
+		for _, cip := range svc.Spec.ClusterIPs {
+			ip := utilnet.ParseIPSloppy(cip).String()
+			cipsToSvcKey[ip] = key
+		}
+
+		c.services[key] = &svcState{
+			v4LB:   v4LB,
+			v4Eps:  sets.New[string](),
+			v6LB:   v6LB,
+			v6Eps:  sets.New[string](),
+			net:    es.Spec.Network,
+			netEps: sets.New[string](),
+			stale:  false,
+		}
+	}
+
+	// fetch all relevant rules, sort by prio, fill gaps into released
+	err := c.repairIPRules(v4EndpointsToSvcKey, v6EndpointsToSvcKey, cipsToSvcKey)
+	if err != nil {
+		return err
+	}
+
+	return c.repairIPTables(v4EndpointsToSvcKey, v6EndpointsToSvcKey)
+}
+
+func (c *Controller) repairIPRules(v4EpsToServices, v6EpsToServices, cipsToServices map[string]string) error {
+	type IPRule struct {
+		Priority int32  `json:"priority"`
+		Src      string `json:"src"`
+		Table    string `json:"table"`
+	}
+
+	repairRules := func(family string) error {
+		epsToSvcKey := v4EpsToServices
+		if family == "-6" {
+			epsToSvcKey = v6EpsToServices
+		}
+
+		allIPRules := []IPRule{}
+		ipRulesToDelete := []IPRule{}
+
+		stdout, stderr, err := util.RunIP(family, "--json", "rule", "show")
+		if err != nil {
+			return fmt.Errorf("could not list %s rules - stdout: %s, stderr: %s, err: %v", family, stdout, stderr, err)
+		}
+
+		err = json.Unmarshal([]byte(stdout), &allIPRules)
+		if err != nil {
+			return err
+		}
+
+		for _, rule := range allIPRules {
+			if rule.Priority != IPRulePriority {
+				continue
+			}
+
+			svcKey, found := epsToSvcKey[rule.Src]
+			if !found {
+				svcKey, found = cipsToServices[rule.Src]
+				if !found {
+					ipRulesToDelete = append(ipRulesToDelete, rule)
+					continue
+				}
+			}
+
+			state := c.services[svcKey]
+			if state == nil {
+				ipRulesToDelete = append(ipRulesToDelete, rule)
+				continue
+			}
+
+			if state.net != rule.Table {
+				ipRulesToDelete = append(ipRulesToDelete, rule)
+				continue
+			}
+
+			state.netEps.Insert(rule.Src)
+		}
+
+		errorList := []error{}
+		for _, rule := range ipRulesToDelete {
+			err := deleteIPRule(family, rule.Priority, rule.Src, rule.Table)
+			if err != nil {
+				errorList = append(errorList, err)
+			}
+		}
+
+		return errors.NewAggregate(errorList)
+	}
+
+	errorList := []error{}
+	if config.IPv4Mode {
+		err := repairRules("-4")
+		if err != nil {
+			errorList = append(errorList, err)
+		}
+	}
+
+	if config.IPv6Mode {
+		err := repairRules("-6")
+		if err != nil {
+			errorList = append(errorList, err)
+		}
+	}
+
+	return errors.NewAggregate(errorList)
+}
+
+func (c *Controller) repairIPTables(v4EpsToServices, v6EpsToServices map[string]string) error {
+	type esvcIPTRule struct {
+		svcKey string
+		ep     string
+		lb     string
+		mark   int32
+	}
+
+	parseIPTRule := func(rule string) (*esvcIPTRule, error) {
+		split := strings.Fields(rule)
+		if len(split)%2 != 0 {
+			return nil, fmt.Errorf("expected rule %s to have an even amount of args", rule)
+		}
+
+		args := map[string]string{}
+		for i := 0; i < len(split); i += 2 {
+			args[split[i]] = split[i+1]
+		}
+
+		svcKey := args["--comment"]
+		ep := args["-s"]
+		lb := args["--to-source"]
+
+		strMark := args["--mark"]
+		mark := int32(0)
+		if strMark != "" {
+			parsedFWMark, err := strconv.ParseInt(strMark, 0, 0)
+			if err != nil {
+				return nil, fmt.Errorf("could not parse fwmark for rule %s, err: %w", rule, err)
+			}
+			mark = int32(parsedFWMark)
+		}
+
+		return &esvcIPTRule{svcKey: svcKey, ep: ep, lb: lb, mark: mark}, nil
+	}
+
+	snatRepair := func(proto iptables.Protocol, epsToSvcs map[string]string) error {
+		// TODO: !MISSING!: CHECK FIRST RULE IS DENY!
+		defaultFirstRule := c.defaultReturnRule(proto)
+
 		ipt, err := util.GetIPTablesHelper(proto)
 		if err != nil {
 			return err
 		}
 
-		err = ipt.ClearChain("nat", Chain)
-		if err != nil {
-			return err
-		}
-		err = ipt.ClearChain("mangle", Chain)
+		snatRules, err := ipt.List("nat", Chain)
 		if err != nil {
 			return err
 		}
 
-		err = nodeipt.AddRules(c.defaultReturnRules(proto), true)
+		if len(snatRules) == 0 {
+			nodeipt.AddRules([]nodeipt.Rule{defaultFirstRule}, true)
+			return nil
+		}
+
+		parsedFWMark, err := strconv.ParseInt(c.returnMark, 0, 0)
 		if err != nil {
-			return err
+			return fmt.Errorf("could not parse %s as default return mark for egress services, err: %w", c.returnMark, err)
+		}
+		mark := int32(parsedFWMark)
+
+		firstRule := snatRules[0]
+		parsed, err := parseIPTRule(firstRule)
+		if err != nil || parsed.mark != mark {
+			err := nodeipt.AddRules([]nodeipt.Rule{defaultFirstRule}, false)
+			if err != nil {
+				return err
+			}
+		}
+
+		rulesToDel := []string{}
+		for _, rule := range snatRules {
+			parsed, err := parseIPTRule(rule)
+			if err != nil {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			svcKey := epsToSvcs[parsed.ep]
+			if svcKey != parsed.svcKey {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			svcState, found := c.services[svcKey]
+			if !found {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			lbToCompare := svcState.v4LB
+			epsToAdd := svcState.v4Eps
+			if proto == iptables.ProtocolIPv6 {
+				lbToCompare = svcState.v6LB
+				epsToAdd = svcState.v6Eps
+			}
+
+			if lbToCompare != parsed.lb {
+				rulesToDel = append(rulesToDel, rule)
+				continue
+			}
+
+			epsToAdd.Insert(parsed.ep)
+		}
+
+		errorList := []error{}
+		for _, rule := range rulesToDel {
+			args := strings.Fields(rule)
+			err := ipt.Delete("nat", Chain, args...)
+			if err != nil {
+				errorList = append(errorList, err)
+			}
+		}
+
+		return errors.NewAggregate(errorList)
+	}
+
+	errorList := []error{}
+	if config.IPv4Mode {
+		ipt, err := util.GetIPTablesHelper(iptables.ProtocolIPv4)
+		if err != nil {
+			errorList = append(errorList, err)
+		}
+
+		ipt.NewChain("nat", Chain)
+
+		err = snatRepair(iptables.ProtocolIPv4, v4EpsToServices)
+		if err != nil {
+			errorList = append(errorList, err)
+		}
+
+	}
+
+	if config.IPv6Mode {
+		ipt, err := util.GetIPTablesHelper(iptables.ProtocolIPv4)
+		if err != nil {
+			errorList = append(errorList, err)
+		}
+
+		ipt.NewChain("nat", Chain)
+
+		err = snatRepair(iptables.ProtocolIPv6, v6EpsToServices)
+		if err != nil {
+			errorList = append(errorList, err)
 		}
 	}
-	return nil
+
+	return errors.NewAggregate(errorList)
 }
 
 func (c *Controller) runEgressServiceWorker(wg *sync.WaitGroup) {
@@ -352,10 +634,10 @@ func (c *Controller) syncEgressService(key string) error {
 
 	if cachedState == nil {
 		cachedState = &svcState{
-			v4Eps:     sets.New[string](),
-			v6Eps:     sets.New[string](),
-			markedEps: sets.New[string](),
-			stale:     false,
+			v4Eps:  sets.New[string](),
+			v6Eps:  sets.New[string](),
+			netEps: sets.New[string](),
+			stale:  false,
 		}
 		c.services[key] = cachedState
 	}
@@ -412,20 +694,17 @@ func (c *Controller) syncEgressService(key string) error {
 	}
 
 	// At this point we finished handling the SNAT rules
-	fwmark, err := c.fwmarkForTable(es.Spec.Network)
-	if err != nil {
-		return err
-	}
+	// Now we create the relevant ip rules according to the object's "Network"
 
-	if fwmark != cachedState.fwmark {
-		err := c.clearServiceFWMarkRules(key, cachedState)
+	if es.Spec.Network != cachedState.net {
+		err := c.clearServiceIPRules(cachedState)
 		if err != nil {
 			return err
 		}
 	}
-	cachedState.fwmark = fwmark
+	cachedState.net = es.Spec.Network
 
-	if cachedState.fwmark == 0 {
+	if cachedState.net == "" {
 		return nil
 	}
 
@@ -436,23 +715,35 @@ func (c *Controller) syncEgressService(key string) error {
 		allEps.Insert(ip)
 	}
 
-	marksToAdd := allEps.Difference(cachedState.markedEps)
-	marksToDelete := cachedState.markedEps.Difference(allEps)
+	ipRulesToAdd := allEps.Difference(cachedState.netEps)
+	ipRulesToDelete := cachedState.netEps.Difference(allEps)
 
-	for ip := range marksToAdd {
-		err := nodeipt.AddRules([]nodeipt.Rule{fwmarkIPTRuleFor(key, cachedState.fwmark, ip)}, true)
+	for ip := range ipRulesToAdd {
+		family := "-4"
+		if utilnet.IsIPv6String(ip) {
+			family = "-6"
+		}
+
+		err := createIPRule(family, IPRulePriority, ip, cachedState.net)
 		if err != nil {
 			return err
 		}
-		cachedState.markedEps.Insert(ip)
+
+		cachedState.netEps.Insert(ip)
 	}
 
-	for ip := range marksToDelete {
-		err := nodeipt.DelRules([]nodeipt.Rule{fwmarkIPTRuleFor(key, cachedState.fwmark, ip)})
+	for ip := range ipRulesToDelete {
+		family := "-4"
+		if utilnet.IsIPv6String(ip) {
+			family = "-6"
+		}
+
+		err := deleteIPRule(family, IPRulePriority, ip, cachedState.net)
 		if err != nil {
 			return err
 		}
-		cachedState.markedEps.Delete(ip)
+
+		cachedState.netEps.Delete(ip)
 	}
 
 	return nil
@@ -523,17 +814,24 @@ func (c *Controller) clearServiceSNATRules(key string, state *svcState) error {
 }
 
 // Clears all of the FWMark rules of the service.
-func (c *Controller) clearServiceFWMarkRules(key string, state *svcState) error {
-	for ip := range state.markedEps {
-		err := nodeipt.DelRules([]nodeipt.Rule{fwmarkIPTRuleFor(key, state.fwmark, ip)})
-		if err != nil {
-			return err
+func (c *Controller) clearServiceIPRules(state *svcState) error {
+	errorList := []error{}
+	for ip := range state.netEps {
+		family := "-4"
+		if utilnet.IsIPv6String(ip) {
+			family = "-6"
 		}
 
-		state.markedEps.Delete(ip)
+		err := deleteIPRule(family, IPRulePriority, ip, state.net)
+		if err != nil {
+			errorList = append(errorList, err)
+			continue
+		}
+
+		state.netEps.Delete(ip)
 	}
 
-	return nil
+	return errors.NewAggregate(errorList)
 }
 
 // Clears all of the iptables rules that relate to the service and removes it from the cache.
@@ -545,7 +843,7 @@ func (c *Controller) clearServiceRules(key string, state *svcState) error {
 		return err
 	}
 
-	err = c.clearServiceFWMarkRules(key, state)
+	err = c.clearServiceIPRules(state)
 	if err != nil {
 		return err
 	}
@@ -563,74 +861,27 @@ func (c *Controller) shouldConfigureEgressSVC(svc *corev1.Service, svcHost strin
 		len(svc.Status.LoadBalancer.Ingress) > 0
 }
 
-// Returns the fwmark value corresponding to the given routing table.
-// If the table does not have an allocated fwmark value this takes care of allocating
-// one and creating the necessary ip rules.
-func (c *Controller) fwmarkForTable(table string) (int32, error) {
-	if table == "" {
-		return 0, nil
-	}
-
-	fwmark, found := c.routingTables[table]
-	if found {
-		return fwmark, nil
-	}
-
-	fwmark = c.availableFWMark
-	if fwmark > maxFWMark {
-		return 0, fmt.Errorf("could not allocate fwmark for table: %s", table)
-	}
-
-	if config.IPv4Mode {
-		if err := createIPRule("-4", fwmark, table); err != nil {
-			return 0, err
-		}
-	}
-
-	if config.IPv6Mode {
-		if err := createIPRule("-6", fwmark, table); err != nil {
-			return 0, err
-		}
-	}
-
-	c.routingTables[table] = fwmark
-	c.availableFWMark++
-
-	return fwmark, nil
-}
-
 // Create the ip rule to use the specified routing table for the fwmark.
 // The rule is created with the same priority as the fwmark, and if a rule
 // exists with that priority it deletes it beforehand.
-func createIPRule(family string, fwmark int32, table string) error {
-	mark := fmt.Sprintf("%d", fwmark)
-
-	stdout, stderr, err := util.RunIP(family, "rule", "del", "prio", mark)
-	if err != nil && !strings.Contains(stderr, "No such file or directory") {
-		return fmt.Errorf("could not delete rule with priority %d - stdout: %s, stderr: %s, err: %v", fwmark, stdout, stderr, err)
-	}
-
-	stdout, stderr, err = util.RunIP(family, "rule", "add", "prio", mark, "fwmark", mark, "table", table)
-	if err != nil {
-		return fmt.Errorf("could not add rule for table %s - stdout: %s, stderr: %s, err: %v", table, stdout, stderr, err)
+func createIPRule(family string, priority int32, src, table string) error {
+	prio := fmt.Sprintf("%d", priority)
+	stdout, stderr, err := util.RunIP(family, "rule", "add", "prio", prio, "from", src, "table", table)
+	if err != nil && !strings.Contains(stderr, "File exists") {
+		return fmt.Errorf("could not add rule for src %s table %s - stdout: %s, stderr: %s, err: %v", src, table, stdout, stderr, err)
 	}
 
 	return nil
 }
 
-// Returns the FWMark rule that should be created for the given fwmark/endpoint
-func fwmarkIPTRuleFor(comment string, fwmark int32, ip string) nodeipt.Rule {
-	return nodeipt.Rule{
-		Table: "mangle",
-		Chain: Chain,
-		Args: []string{
-			"-s", ip,
-			"-m", "comment", "--comment", comment,
-			"-j", "MARK",
-			"--set-mark", fmt.Sprintf("%d", fwmark),
-		},
-		Protocol: getIPTablesProtocol(ip),
+func deleteIPRule(family string, priority int32, src, table string) error {
+	prio := fmt.Sprintf("%d", priority)
+	stdout, stderr, err := util.RunIP(family, "rule", "del", "prio", prio, "from", src, "table", table)
+	if err != nil && !strings.Contains(stderr, "No such file or directory") {
+		return fmt.Errorf("could not delete rule for src %s table %s - stdout: %s, stderr: %s, err: %v", src, table, stdout, stderr, err)
 	}
+
+	return nil
 }
 
 // Returns the SNAT rule that should be created for the given lb/endpoint
@@ -656,27 +907,15 @@ func getIPTablesProtocol(ip string) iptables.Protocol {
 	return iptables.ProtocolIPv4
 }
 
-func (c *Controller) defaultReturnRules(proto iptables.Protocol) []nodeipt.Rule {
-	return []nodeipt.Rule{
-		{
-			Table: "nat",
-			Chain: Chain,
-			Args: []string{
-				"-m", "mark", "--mark", string(c.returnMark),
-				"-m", "comment", "--comment", "Do not SNAT to SVC VIP",
-				"-j", "RETURN",
-			},
-			Protocol: proto,
+func (c *Controller) defaultReturnRule(proto iptables.Protocol) nodeipt.Rule {
+	return nodeipt.Rule{
+		Table: "nat",
+		Chain: Chain,
+		Args: []string{
+			"-m", "mark", "--mark", string(c.returnMark),
+			"-m", "comment", "--comment", "Do not SNAT to SVC VIP",
+			"-j", "RETURN",
 		},
-		{
-			Table: "mangle",
-			Chain: Chain,
-			Args: []string{
-				"-m", "mark", "--mark", string(c.returnMark),
-				"-m", "comment", "--comment", "Do not mark",
-				"-j", "RETURN",
-			},
-			Protocol: proto,
-		},
+		Protocol: proto,
 	}
 }
