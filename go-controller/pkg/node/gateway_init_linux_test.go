@@ -334,11 +334,7 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 				"OUTPUT": []string{
 					"-j OVN-KUBE-ITP",
 				},
-				"PREROUTING": []string{
-					"-j OVN-KUBE-EGRESS-SVC",
-				},
-				"OVN-KUBE-ITP":        []string{},
-				"OVN-KUBE-EGRESS-SVC": []string{},
+				"OVN-KUBE-ITP": []string{},
 			},
 		}
 		f4 := iptV4.(*util.FakeIPTables)
@@ -1051,11 +1047,7 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`,
 				"OUTPUT": []string{
 					"-j OVN-KUBE-ITP",
 				},
-				"PREROUTING": []string{
-					"-j OVN-KUBE-EGRESS-SVC",
-				},
-				"OVN-KUBE-ITP":        []string{},
-				"OVN-KUBE-EGRESS-SVC": []string{},
+				"OVN-KUBE-ITP": []string{},
 			},
 		}
 		f4 := iptV4.(*util.FakeIPTables)

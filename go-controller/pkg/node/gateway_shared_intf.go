@@ -731,7 +731,7 @@ func (npw *nodePortWatcher) SyncServices(services []interface{}) error {
 				errors = append(errors, err)
 			}
 		}
-		for _, chain := range []string{iptableITPChain, egressservice.Chain} {
+		for _, chain := range []string{iptableITPChain} {
 			if err = recreateIPTRules("mangle", chain, keepIPTRules); err != nil {
 				errors = append(errors, err)
 			}

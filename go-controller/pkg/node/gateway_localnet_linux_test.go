@@ -358,11 +358,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -439,11 +435,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -522,11 +514,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -619,11 +607,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -719,11 +703,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -827,11 +807,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 				expectedLBIngressFlows := []string{
@@ -966,11 +942,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 				expectedLBIngressFlows := []string{
@@ -1074,11 +1046,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -1196,11 +1164,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 				expectedNodePortFlows := []string{
@@ -1304,11 +1268,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -1405,11 +1365,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -1501,11 +1457,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -1586,11 +1538,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -1678,11 +1626,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -1721,11 +1665,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -1808,11 +1748,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 				By("verify that a new retry entry for this service exists")
@@ -1918,11 +1854,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -1961,11 +1893,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -2059,11 +1987,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -2104,11 +2028,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -2206,11 +2126,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 				expectedFlows := []string{
@@ -2256,11 +2172,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -2359,11 +2271,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 				expectedFlows := []string{
@@ -2410,11 +2318,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -2511,13 +2415,9 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
 						"OVN-KUBE-ITP": []string{
 							fmt.Sprintf("-p %s -d %s --dport %d -j MARK --set-xmark %s", service.Spec.Ports[0].Protocol, service.Spec.ClusterIP, service.Spec.Ports[0].Port, ovnkubeITPMark),
 						},
-						"OVN-KUBE-EGRESS-SVC": []string{},
 					},
 				}
 				expectedFlows := []string{
@@ -2563,11 +2463,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
@@ -2665,11 +2561,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 				expectedFlows := []string{
@@ -2716,11 +2608,7 @@ var _ = Describe("Node Operations", func() {
 						"OUTPUT": []string{
 							"-j OVN-KUBE-ITP",
 						},
-						"PREROUTING": []string{
-							"-j OVN-KUBE-EGRESS-SVC",
-						},
-						"OVN-KUBE-ITP":        []string{},
-						"OVN-KUBE-EGRESS-SVC": []string{},
+						"OVN-KUBE-ITP": []string{},
 					},
 				}
 
