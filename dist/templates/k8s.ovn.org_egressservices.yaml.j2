@@ -43,62 +43,70 @@ spec:
                   as VRF mapping, representing a numeric id or string name of a routing
                   table which by omission uses the default host routing.
                 type: string
-              nodeSelector:
-                description: Allows limiting the nodes that can be selected to handle
-                  the service's traffic. When present only a node whose labels match
-                  the specified selectors can be selected for handling the service's
-                  traffic. When it is not specified any node in the cluster can be
-                  chosen to manage the service's traffic.
+              snat:
+                description: Determines if the source IP of egress traffic originating
+                  from the pods backing the Service should be set to its ingress IP.
+                  When the field is not specified the source IP is set according to the
+                  interface of the Network.
                 properties:
-                  matchExpressions:
-                    description: matchExpressions is a list of label selector requirements.
-                      The requirements are ANDed.
-                    items:
-                      description: A label selector requirement is a selector that
-                        contains values, a key, and an operator that relates the key
-                        and values.
-                      properties:
-                        key:
-                          description: key is the label key that the selector applies
-                            to.
+                  nodeSelector:
+                    description: Allows limiting the nodes that can be selected to
+                      handle the service's traffic. When present only a node whose
+                      labels match the specified selectors can be selected for handling
+                      the service's traffic. When it is not specified any node in
+                      the cluster can be chosen to manage the service's traffic.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: A label selector requirement is a selector
+                            that contains values, a key, and an operator that relates
+                            the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: operator represents a key's relationship
+                                to a set of values. Valid operators are In, NotIn,
+                                Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: values is an array of string values. If
+                                the operator is In or NotIn, the values array must
+                                be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced
+                                during a strategic merge patch.
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                      matchLabels:
+                        additionalProperties:
                           type: string
-                        operator:
-                          description: operator represents a key's relationship to
-                            a set of values. Valid operators are In, NotIn, Exists
-                            and DoesNotExist.
-                          type: string
-                        values:
-                          description: values is an array of string values. If the
-                            operator is In or NotIn, the values array must be non-empty.
-                            If the operator is Exists or DoesNotExist, the values
-                            array must be empty. This array is replaced during a strategic
-                            merge patch.
-                          items:
-                            type: string
-                          type: array
-                      required:
-                      - key
-                      - operator
-                      type: object
-                    type: array
-                  matchLabels:
-                    additionalProperties:
-                      type: string
-                    description: matchLabels is a map of {key,value} pairs. A single
-                      {key,value} in the matchLabels map is equivalent to an element
-                      of matchExpressions, whose key field is "key", the operator
-                      is "In", and the values array contains only "value". The requirements
-                      are ANDed.
+                        description: matchLabels is a map of {key,value} pairs. A
+                          single {key,value} in the matchLabels map is equivalent
+                          to an element of matchExpressions, whose key field is "key",
+                          the operator is "In", and the values array contains only
+                          "value". The requirements are ANDed.
+                        type: object
                     type: object
+                    x-kubernetes-map-type: atomic
                 type: object
-                x-kubernetes-map-type: atomic
             type: object
           status:
             description: EgressServiceStatus defines the observed state of EgressService
             properties:
               host:
                 description: The name of the node selected to handle the service's
-                  traffic.
+                  traffic. In case "snat" is not specified the field will be set to
+                  "ALL".
                 type: string
             required:
             - host
