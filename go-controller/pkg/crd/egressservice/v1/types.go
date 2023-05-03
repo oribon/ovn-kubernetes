@@ -39,12 +39,12 @@ type EgressService struct {
 
 // EgressServiceSpec defines the desired state of EgressService
 type EgressServiceSpec struct {
-	// Allows limiting the nodes that can be selected to handle the service's traffic.
-	// When present only a node whose labels match the specified selectors can be selected
-	// for handling the service's traffic.
-	// When it is not specified any node in the cluster can be chosen to manage the service's traffic.
+	// Determines if the source IP of egress traffic originating
+	// from the pods backing the Service should be set to its ingress IP.
+	// When the field is not specified the source IP is set according to the
+	// interface of the Network, leveraging the masquerade rules that are already in place.
 	// +optional
-	NodeSelector metav1.LabelSelector `json:"nodeSelector,omitempty"`
+	SNAT *EgressServiceSNAT `json:"snat,omitempty"`
 
 	// The network which this service should send egress and corresponding ingress replies to.
 	// This is typically implemented as VRF mapping, representing a numeric id or string name
@@ -53,9 +53,19 @@ type EgressServiceSpec struct {
 	Network string `json:"network,omitempty"`
 }
 
+type EgressServiceSNAT struct {
+	// Allows limiting the nodes that can be selected to handle the service's traffic.
+	// When present only a node whose labels match the specified selectors can be selected
+	// for handling the service's traffic.
+	// When it is not specified any node in the cluster can be chosen to manage the service's traffic.
+	// +optional
+	NodeSelector metav1.LabelSelector `json:"nodeSelector,omitempty"`
+}
+
 // EgressServiceStatus defines the observed state of EgressService
 type EgressServiceStatus struct {
 	// The name of the node selected to handle the service's traffic.
+	// In case "snat" is not specified the field will be set to "ALL".
 	Host string `json:"host"`
 }
 
