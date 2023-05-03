@@ -87,6 +87,9 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Name:      "svc1",
 						Namespace: "testns",
 					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
+					},
 					Status: egressserviceapi.EgressServiceStatus{
 						Host: node1Name,
 					},
@@ -97,6 +100,9 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "svc2",
 						Namespace: "testns",
+					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 					},
 					Status: egressserviceapi.EgressServiceStatus{
 						Host: node2Name,
@@ -110,6 +116,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"kubernetes.io/hostname": node2.Name,
@@ -122,6 +129,17 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 				}
 				svc3 := lbSvcFor("testns", "svc3")
 				svc3.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyTypeLocal
+
+				esvc4 := egressserviceapi.EgressService{ // sourceIPBy != LB
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc4",
+						Namespace: "testns",
+					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPNetwork,
+					},
+				}
+				svc4 := lbSvcFor("testns", "svc4")
 
 				svc1EpSlice := discovery.EndpointSlice{
 					ObjectMeta: metav1.ObjectMeta{
@@ -169,6 +187,22 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 					},
 				}
 
+				svc4EpSlice := discovery.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc4-epslice",
+						Namespace: "testns",
+						Labels: map[string]string{
+							discovery.LabelServiceName: "svc4",
+						},
+					},
+					Endpoints: []discovery.Endpoint{
+						{
+							Addresses: []string{"10.128.1.27"},
+							NodeName:  &node1.Name,
+						},
+					},
+				}
+
 				staleLRP1 := &nbdb.LogicalRouterPolicy{
 					ExternalIDs: map[string]string{"EgressSVC": "testns/gonesvc"}, // the service was deleted
 					Priority:    types.EgressSVCReroutePriority,
@@ -209,6 +243,14 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 					Nexthops:    []string{"10.128.2.2"}, // node2 can't be used for etp=local svc3 whose only endpoint is on node1
 				}
 
+				staleLRP6 := &nbdb.LogicalRouterPolicy{ // belongs to an EgressService with srcIPBy != LB
+					ExternalIDs: map[string]string{"EgressSVC": "testns/svc4"},
+					Priority:    types.EgressSVCReroutePriority,
+					UUID:        "staleLRP6-UUID",
+					Match:       "ip4.src == 10.128.1.27",
+					Nexthops:    []string{"10.128.1.2"},
+				}
+
 				toKeepLRP1 := &nbdb.LogicalRouterPolicy{
 					ExternalIDs: map[string]string{"EgressSVC": "testns/svc1"},
 					Priority:    types.EgressSVCReroutePriority,
@@ -240,6 +282,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						staleLRP3,
 						staleLRP4,
 						staleLRP5,
+						staleLRP6,
 						toKeepLRP1,
 						toKeepLRP2,
 						clusterRouter,
@@ -267,6 +310,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 							svc1,
 							svc2,
 							svc3,
+							svc4,
 						},
 					},
 					&discovery.EndpointSliceList{
@@ -274,6 +318,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 							svc1EpSlice,
 							svc2EpSlice,
 							svc3EpSlice,
+							svc4EpSlice,
 						},
 					},
 					&egressserviceapi.EgressServiceList{
@@ -281,6 +326,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 							esvc1,
 							esvc2,
 							esvc3,
+							esvc4,
 						},
 					},
 				)
@@ -313,10 +359,11 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 
 				node1.Labels = map[string]string{
 					"unrelated-label": "",
-					fmt.Sprintf("%s/deleted-service1", egressSVCLabelPrefix): "",
-					fmt.Sprintf("%s/deleted-service2", egressSVCLabelPrefix): "",
-					fmt.Sprintf("%s/testns-svc1", egressSVCLabelPrefix):      "",
-					fmt.Sprintf("%s/testns-svc2", egressSVCLabelPrefix):      "",
+					fmt.Sprintf("%s/deleted-service1", egressSVCLabelPrefix):    "",
+					fmt.Sprintf("%s/deleted-service2", egressSVCLabelPrefix):    "",
+					fmt.Sprintf("%s/srcip-not-by-lb-svc", egressSVCLabelPrefix): "",
+					fmt.Sprintf("%s/testns-svc1", egressSVCLabelPrefix):         "",
+					fmt.Sprintf("%s/testns-svc2", egressSVCLabelPrefix):         "",
 				}
 
 				node2.Labels = map[string]string{
@@ -332,6 +379,9 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Name:      "svc1",
 						Namespace: "testns",
 					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
+					},
 					Status: egressserviceapi.EgressServiceStatus{
 						Host: node1Name,
 					},
@@ -343,11 +393,28 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Name:      "svc2",
 						Namespace: "testns",
 					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
+					},
 					Status: egressserviceapi.EgressServiceStatus{
 						Host: node2Name,
 					},
 				}
 				svc2 := lbSvcFor("testns", "svc2")
+
+				noSrcIPByLBEgressService := egressserviceapi.EgressService{ // srcIPBy != LB
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "srcip-not-by-lb-svc",
+						Namespace: "testns",
+					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPNetwork,
+					},
+					Status: egressserviceapi.EgressServiceStatus{
+						Host: node1Name,
+					},
+				}
+				noSrcIPByLBService := lbSvcFor("testns", "srcip-not-by-lb-svc")
 
 				svc1EpSlice := discovery.EndpointSlice{
 					ObjectMeta: metav1.ObjectMeta{
@@ -379,6 +446,22 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 					},
 				}
 
+				noSrcIPByLBEpSlice := discovery.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "srcip-not-by-lb-epslice",
+						Namespace: "testns",
+						Labels: map[string]string{
+							discovery.LabelServiceName: "srcip-not-by-lb-svc",
+						},
+					},
+					Endpoints: []discovery.Endpoint{
+						{
+							Addresses: []string{"10.128.1.27"},
+							NodeName:  &node1.Name,
+						},
+					},
+				}
+
 				dbSetup := libovsdbtest.TestSetup{
 					NBData: []libovsdbtest.TestData{
 						&nbdb.LogicalRouter{
@@ -404,18 +487,21 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Items: []v1.Service{
 							svc1,
 							svc2,
+							noSrcIPByLBService,
 						},
 					},
 					&discovery.EndpointSliceList{
 						Items: []discovery.EndpointSlice{
 							svc1EpSlice,
 							svc2EpSlice,
+							noSrcIPByLBEpSlice,
 						},
 					},
 					&egressserviceapi.EgressServiceList{
 						Items: []egressserviceapi.EgressService{
 							esvc1,
 							esvc2,
+							noSrcIPByLBEgressService,
 						},
 					},
 				)
@@ -475,6 +561,19 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Name:      "svc1",
 						Namespace: "testns",
 					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
+					},
+					Status: egressserviceapi.EgressServiceStatus{
+						Host: node1Name,
+					},
+				}
+
+				noSrcIPByLBEgressService := egressserviceapi.EgressService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc2",
+						Namespace: "testns",
+					},
 					Status: egressserviceapi.EgressServiceStatus{
 						Host: node1Name,
 					},
@@ -503,6 +602,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 					&egressserviceapi.EgressServiceList{
 						Items: []egressserviceapi.EgressService{
 							esvc1,
+							noSrcIPByLBEgressService,
 						},
 					},
 				)
@@ -510,16 +610,24 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 				fakeOVN.InitAndRunEgressSVCController()
 
 				gomega.Eventually(func() error {
-					es, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), esvc1.Name, metav1.GetOptions{})
+					es1, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), esvc1.Name, metav1.GetOptions{})
 					if err != nil {
 						return err
 					}
 
-					if es.Status.Host != "" {
-						return fmt.Errorf("expected svc1's host value %s to be empty", es.Status.Host)
+					if es1.Status.Host != "" {
+						return fmt.Errorf("expected svc1's host value %s to be empty", es1.Status.Host)
 					}
 
-					return nil
+					es2, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), noSrcIPByLBEgressService.Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if es2.Status.Host != "ALL" {
+						return fmt.Errorf("expected svc2's host value %s to be ALL", es2.Status.Host)
+					}
+
 					return nil
 				}).ShouldNot(gomega.HaveOccurred())
 
@@ -558,6 +666,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"firstName": "Albus",
@@ -655,6 +764,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"firstName": "Severus",
@@ -733,6 +843,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"house": "Gryffindor",
@@ -905,6 +1016,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"animal": "FlyingBison",
@@ -1094,6 +1206,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"a:b": "c&",
@@ -1176,6 +1289,196 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 			err := app.Run([]string{app.Name})
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
+
+		ginkgo.It("should delete resources when sourceIPBy is changed to non-LB", func() {
+			app.Action = func(ctx *cli.Context) error {
+				namespaceT := *newNamespace("testns")
+				config.IPv6Mode = true
+				node1 := nodeFor(node1Name, node1IPv4, node1IPv6, node1IPv4Subnet, node1IPv6Subnet)
+
+				clusterRouter := &nbdb.LogicalRouter{
+					Name: types.OVNClusterRouter,
+					UUID: types.OVNClusterRouter + "-UUID",
+				}
+
+				dbSetup := libovsdbtest.TestSetup{
+					NBData: []libovsdbtest.TestData{
+						clusterRouter,
+					},
+				}
+
+				ginkgo.By("creating a service with v4 and v6 endpoints it will be allocated on the first node")
+				esvc1 := egressserviceapi.EgressService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "testns",
+					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
+					},
+				}
+				svc1 := lbSvcFor("testns", "svc1")
+
+				v4EpSlice := discovery.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1-ipv4-epslice",
+						Namespace: "testns",
+						Labels: map[string]string{
+							discovery.LabelServiceName: "svc1",
+						},
+					},
+					AddressType: discovery.AddressTypeIPv4,
+					Endpoints: []discovery.Endpoint{
+						{
+							Addresses: []string{"10.128.1.5"},
+						},
+						{
+							Addresses: []string{"10.128.1.6"},
+						},
+					},
+				}
+
+				v6EpSlice := discovery.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1-ipv6-epslice",
+						Namespace: "testns",
+						Labels: map[string]string{
+							discovery.LabelServiceName: "svc1",
+						},
+					},
+					AddressType: discovery.AddressTypeIPv6,
+					Endpoints: []discovery.Endpoint{
+						{
+							Addresses: []string{"fe00:10:128:1::5"},
+						},
+						{
+							Addresses: []string{"fe00:10:128:1::6"},
+						},
+					},
+				}
+
+				fakeOVN.startWithDBSetup(dbSetup,
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+					&v1.NodeList{
+						Items: []v1.Node{
+							*node1,
+						},
+					},
+					&v1.ServiceList{
+						Items: []v1.Service{
+							svc1,
+						},
+					},
+					&discovery.EndpointSliceList{
+						Items: []discovery.EndpointSlice{
+							v4EpSlice,
+							v6EpSlice,
+						},
+					},
+					&egressserviceapi.EgressServiceList{
+						Items: []egressserviceapi.EgressService{
+							esvc1,
+						},
+					},
+				)
+
+				fakeOVN.InitAndRunEgressSVCController()
+
+				v4lrp1 := lrpForEgressSvcEndpoint("v4lrp1-UUID", "testns/svc1", "10.128.1.5", "10.128.1.2")
+				v4lrp2 := lrpForEgressSvcEndpoint("v4lrp2-UUID", "testns/svc1", "10.128.1.6", "10.128.1.2")
+				v6lrp1 := lrpForEgressSvcEndpoint("v6lrp1-UUID", "testns/svc1", "fe00:10:128:1::5", "fe00:10:128:1::2")
+				v6lrp2 := lrpForEgressSvcEndpoint("v6lrp2-UUID", "testns/svc1", "fe00:10:128:1::6", "fe00:10:128:1::2")
+				clusterRouter.Policies = []string{"v4lrp1-UUID", "v4lrp2-UUID", "v6lrp1-UUID", "v6lrp2-UUID"}
+				expectedDatabaseState := []libovsdbtest.TestData{
+					clusterRouter,
+					v4lrp1,
+					v4lrp2,
+					v6lrp1,
+					v6lrp2,
+				}
+
+				for _, lrp := range getDefaultNoReroutePolicies(controllerName) {
+					expectedDatabaseState = append(expectedDatabaseState, lrp)
+					clusterRouter.Policies = append(clusterRouter.Policies, lrp.UUID)
+				}
+				gomega.Eventually(fakeOVN.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
+
+				gomega.Eventually(func() error {
+					es, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), esvc1.Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if es.Status.Host != node1.Name {
+						return fmt.Errorf("expected svc1's host value %s to be node1", es.Status.Host)
+					}
+
+					node1ExpectedLabels := map[string]string{
+						"kubernetes.io/hostname":                            node1.Name,
+						fmt.Sprintf("%s/testns-svc1", egressSVCLabelPrefix): "",
+					}
+
+					node1, err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Get(context.TODO(), node1Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if !reflect.DeepEqual(node1.Labels, node1ExpectedLabels) {
+						return fmt.Errorf("expected node1's labels %v to be equal %v", node1.Labels, node1ExpectedLabels)
+					}
+
+					return nil
+				}).ShouldNot(gomega.HaveOccurred())
+
+				ginkgo.By("setting the EgressService's SourceIPBy to Network its lrps will be removed, host set to ALL, label removed from its node")
+				esvc1.Spec.SourceIPBy = egressserviceapi.SourceIPNetwork
+				esvc1.ResourceVersion = "2"
+				_, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Update(context.TODO(), &esvc1, metav1.UpdateOptions{})
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				clusterRouter.Policies = []string{}
+				expectedDatabaseState = []libovsdbtest.TestData{clusterRouter}
+				for _, lrp := range getDefaultNoReroutePolicies(controllerName) {
+					expectedDatabaseState = append(expectedDatabaseState, lrp)
+					clusterRouter.Policies = append(clusterRouter.Policies, lrp.UUID)
+				}
+				gomega.Eventually(fakeOVN.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
+
+				gomega.Eventually(func() error {
+					es, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), esvc1.Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if es.Status.Host != "ALL" {
+						return fmt.Errorf("expected svc1's host value %s to be ALL", es.Status.Host)
+					}
+
+					node1ExpectedLabels := map[string]string{
+						"kubernetes.io/hostname": node1.Name,
+					}
+
+					node1, err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Get(context.TODO(), node1Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if !reflect.DeepEqual(node1.Labels, node1ExpectedLabels) {
+						return fmt.Errorf("expected node1's labels %v to be equal %v", node1.Labels, node1ExpectedLabels)
+					}
+
+					return nil
+				}).ShouldNot(gomega.HaveOccurred())
+
+				return nil
+			}
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		})
 	})
 
 	ginkgo.Context("on endpointslices changes", func() {
@@ -1201,6 +1504,9 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "svc1",
 						Namespace: "testns",
+					},
+					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 					},
 				}
 				svc1 := lbSvcFor("testns", "svc1")
@@ -1399,6 +1705,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"square": "pants",
@@ -1553,6 +1860,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"home": "pineapple",
@@ -1568,6 +1876,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"home": "moai",
@@ -1892,6 +2201,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 						Namespace: "testns",
 					},
 					Spec: egressserviceapi.EgressServiceSpec{
+						SourceIPBy: egressserviceapi.SourceIPLoadBalancer,
 						NodeSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
 								"kubernetes.io/hostname": node1.Name,

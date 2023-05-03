@@ -43,6 +43,7 @@ const (
 	maxRetries           = 10
 	svcExternalIDKey     = "EgressSVC" // key set on lrps to identify to which egress service it belongs
 	egressSVCLabelPrefix = "egress-service.k8s.ovn.org"
+	noSNATHost           = "ALL" // host key set on status when the service does not need SNAT
 )
 
 type InitClusterEgressPoliciesFunc func(client libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
@@ -323,6 +324,10 @@ func (c *Controller) repair() error {
 			continue
 		}
 
+		if es.Spec.SourceIPBy != egressserviceapi.SourceIPLoadBalancer {
+			continue
+		}
+
 		nodeSelector := &es.Spec.NodeSelector
 		svcHost := es.Status.Host
 
@@ -462,6 +467,13 @@ func (c *Controller) repair() error {
 		key, err := cache.MetaNamespaceKeyFunc(es)
 		if err != nil {
 			klog.Errorf("Failed to read EgressService key: %v", err)
+			continue
+		}
+		if es.Spec.SourceIPBy != egressserviceapi.SourceIPLoadBalancer {
+			err := c.setEgressServiceHost(es.Namespace, es.Name, noSNATHost)
+			if err != nil {
+				klog.Errorf("Failed to set %s host entry on EgressService %s, err: %v", noSNATHost, key, err)
+			}
 			continue
 		}
 		_, found := c.services[key]
@@ -618,8 +630,6 @@ func (c *Controller) syncEgressService(key string) error {
 		return c.clearServiceResourcesAndRequeue(key, state)
 	}
 
-	// At this point both the EgressService resource and the Service != nil
-
 	if state != nil && state.stale {
 		// The service is marked stale because something failed when trying to delete it.
 		// We try to delete it again before doing anything else.
@@ -639,6 +649,28 @@ func (c *Controller) syncEgressService(key string) error {
 		klog.V(4).Infof("EgressService %s/%s does not have an ingress ip anymore, removing its existing configuration", namespace, name)
 		return c.clearServiceResourcesAndRequeue(key, state)
 	}
+
+	// At this point the Service has at least one ingress IP and its EgressService != nil.
+	// We check if it has the SNAT field specified to determine if we need to clean its resources,
+	// set host=ALL and stop processing or not.
+	if es.Spec.SourceIPBy != egressserviceapi.SourceIPLoadBalancer {
+		if state == nil {
+			// The service does not need SNAT LRPs and was not an allocated egress service.
+			// We delete it from the unallocated service cache just in case and set its host
+			// to "ALL".
+			delete(c.unallocatedServices, key)
+			return c.setEgressServiceHost(namespace, name, noSNATHost)
+		}
+
+		err := c.clearServiceResourcesAndRequeue(key, state)
+		if err != nil {
+			return err
+		}
+
+		return c.setEgressServiceHost(namespace, name, noSNATHost)
+	}
+
+	// At this point both the EgressService SNAT and the Service != nil
 
 	nodeSelector := es.Spec.NodeSelector
 	v4Endpoints, v6Endpoints, epsNodes, err := c.allEndpointsFor(svc)
