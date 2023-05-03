@@ -2129,12 +2129,74 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 				}
 				gomega.Eventually(fakeOVN.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
 
+				ginkgo.By("adding wrong service labels to the nodes they will be deleted")
+				node1.Labels[fmt.Sprintf("%s/testns-svc2", egressSVCLabelPrefix)] = ""
+				node1.Labels[fmt.Sprintf("%s/non-existing-svc", egressSVCLabelPrefix)] = ""
+				node1.ResourceVersion = "3"
+				node1, err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Update(context.TODO(), node1, metav1.UpdateOptions{})
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				node2.Labels[fmt.Sprintf("%s/non-existing-svc", egressSVCLabelPrefix)] = ""
+				node2.ResourceVersion = "3"
+				node2, err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Update(context.TODO(), node2, metav1.UpdateOptions{})
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				gomega.Eventually(func() error {
+					es, err := fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), esvc1.Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if es.Status.Host != "" {
+						return fmt.Errorf("expected svc1's host value %s to be empty", es.Status.Host)
+					}
+
+					node1ExpectedLabels := map[string]string{
+						"home": "pineapple",
+					}
+
+					node1, err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Get(context.TODO(), node1Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if !reflect.DeepEqual(node1.Labels, node1ExpectedLabels) {
+						return fmt.Errorf("expected node1's labels %v to be equal %v", node1.Labels, node1ExpectedLabels)
+					}
+
+					es, err = fakeOVN.fakeClient.EgressServiceClient.K8sV1().EgressServices("testns").Get(context.TODO(), esvc2.Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if es.Status.Host != node2.Name {
+						return fmt.Errorf("expected svc1's host value %s to be node2", es.Status.Host)
+					}
+
+					node2ExpectedLabels := map[string]string{
+						"home": "moai",
+						fmt.Sprintf("%s/testns-svc2", egressSVCLabelPrefix): "",
+					}
+
+					node2, err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Get(context.TODO(), node2Name, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					if !reflect.DeepEqual(node2.Labels, node2ExpectedLabels) {
+						return fmt.Errorf("expected node2's labels %v to be equal %v", node2.Labels, node2ExpectedLabels)
+					}
+
+					return nil
+				}).ShouldNot(gomega.HaveOccurred())
+				gomega.Eventually(fakeOVN.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
+
 				ginkgo.By("updating the second node host addresses the node ip no re-route address set will be updated")
 				nodeIPsASdbIDs := getEgressIPAddrSetDbIDs(NodeIPAddrSetName, DefaultNetworkControllerName)
 				fakeOVN.asf.EventuallyExpectAddressSetWithIPs(nodeIPsASdbIDs, []string{node1IPv4, node2IPv4, node1IPv6, node2IPv6})
 
 				node2.ObjectMeta.Annotations["k8s.ovn.org/host-addresses"] = fmt.Sprintf("[\"%s\", \"%s\", \"%s\", \"%s\"]", node2IPv4, node2IPv6, vipIPv4, vipIPv6)
-				node2.ResourceVersion = "3"
+				node2.ResourceVersion = "4"
 				_, err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Update(context.TODO(), node2, metav1.UpdateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -2142,7 +2204,7 @@ var _ = ginkgo.Describe("OVN Egress Service Operations", func() {
 				gomega.Eventually(fakeOVN.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
 
 				node2.ObjectMeta.Annotations["k8s.ovn.org/host-addresses"] = fmt.Sprintf("[\"%s\", \"%s\"]", node2IPv4, node2IPv6)
-				node2.ResourceVersion = "4"
+				node2.ResourceVersion = "5"
 				_, err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Update(context.TODO(), node2, metav1.UpdateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 

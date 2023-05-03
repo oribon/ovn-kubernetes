@@ -832,6 +832,7 @@ func (c *Controller) clearServiceResourcesAndRequeue(key string, svcState *svcSt
 			return fmt.Errorf("failed to remove svc node label for %s, err: %v", svcState.node, err)
 		}
 		delete(nodeState.allocations, key)
+		delete(nodeState.labels, c.nodeLabelForService(namespace, name))
 	}
 
 	delete(c.services, key)
