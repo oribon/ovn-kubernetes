@@ -2,16 +2,17 @@
 
 ## Introduction
 
-The Egress Service feature enables the egress traffic of pods backing a LoadBalancer service to exit the cluster using its ingress IP.
+The Egress Service feature enables the egress traffic of pods backing a LoadBalancer service to use a different network than the main one and/or their source IP to be the Service's ingress IP.
 This is useful for external systems that communicate with applications running on the Kubernetes cluster through a LoadBalancer service and expect that the source IP of egress traffic originating from the pods backing the service is identical to the destination IP they use to reach them - i.e the LoadBalancer's ingress IP.
+In addition, this allows to separate the egress traffic of specified LoadBalancer services by different networks (VRFs).
 
-By introducing a new CRD `EgressService`, users could request that the source IP of egress packets originating from all of the pods that are endpoints of a LoadBalancer service would be its ingress IP.
+By introducing a new CRD `EgressService`, users could request that egress packets originating from all of the pods that are endpoints of a LoadBalancer service would use a different network than the main one and/or their source IP will be the Service's ingress IP.
 The CRD is namespace scoped. The name of the EgressService corresponds to the name of a LoadBalancer Service that should be affected by this functionality. Note the mapping of EgressService to Kubernetes Service is 1to1.
 The feature will be supported by both "Shared" and "Local" gateway modes and the affected traffic will be that which is coming from a pod to a destination outside of the cluster - meaning pod-pod / pod-service / pod-node traffic will not be affected.
 
 Announcing the service externally (for ingress traffic) is handled by a LoadBalancer provider (like MetalLB) and not by OVN-Kubernetes as explained later.
 
-## Details
+## Details - Modifying the source IP of the egress packets
 
 Only SNATing a pod's IP to the LoadBalancer service ingress IP that it is backing is problematic, as usually the ingress IP is exposed via multiple nodes by the LoadBalancer provider. This means we can't just add an SNAT to the regular traffic flow of a pod before it exits its node because we don't have a guarantee that the reply will come back to the pod's node (where the traffic originated).
 An external client usually has multiple paths to reach the LoadBalancer ingress IP and could reply to a node that is not the pod's node - in that case the other node does not have the proper CONNTRACK entries to send the reply back to the pod and the traffic is lost.
@@ -22,13 +23,16 @@ When that traffic reaches the node's mgmt port it will use its routing table and
 Because of that, it takes care of adding the necessary iptables rules on the selected node to SNAT traffic exiting from these pods to the service's ingress IP.
 
 These goals are achieved by introducing a new resource `EgressService` for users to create alongside LoadBalancer services which can be either empty or contain optional fields:
-- `nodeSelector`: allows limiting the nodes that can be selected to handle the service's traffic.
+- `snat`: Determines if the source IP of egress traffic originating from the pods backing the Service should be set to its ingress IP.
+When the field is not specified the source IP is set according to the interface of the Network, leveraging the masquerade rules that are already in place.
+  - `nodeSelector`: Allows limiting the nodes that can be selected to handle the service's traffic.
 When present only a node whose labels match the specified selectors can be selected for handling the service's traffic as explained earlier.
 When the field is not specified any node in the cluster can be chosen to manage the service's traffic.
-In addition, if the service's `ExternalTrafficPolicy` is set to `Local` an additional constraint is added that only a node that has an endpoint can be selected.
 
 - `network`: The network which this service should send egress and corresponding ingress replies to.
 This is typically implemented as VRF mapping, representing a numeric id or string name of a routing table which by omission uses the default host routing.
+
+Although the fields are optional, an empty resource does not have any meaning and would not modify any behavior.
 
 When a node is selected to handle the service's traffic both the status of the relevant `EgressService` is updated with `host: <node_name>` (which is consumed by `ovnkube-node`) and the node is labeled with `egress-service.k8s.ovn.org/<svc-namespace>-<svc-name>: ""`, which can be consumed by a LoadBalancer provider to handle the ingress part.
 
@@ -74,6 +78,10 @@ Assuming an Egress Service has `172.19.0.100` as its ingress IP and `ovn-worker`
                    routes and iptables rules
 ```
 Notice how the packet exits `ovn-worker`'s eth1 and not breth0, as the packet goes through the host's routing table regardless of the gateway mode.
+
+When the `snat` field is not specified, `ovnkube-master` does not need to create any logical router policies as the egress packets of each pod would exit through the pod's node.
+However, `ovnkube-master` will set the status field of the resource with `host: ALL` to designate that no reroute logical router policies exist for the service, "instructing" all of the `ovnkube-nodes` to handle the resource's `Network` field without creating SNAT iptables rules.
+
 
 ## Changes in OVN northbound database and iptables
 
@@ -135,9 +143,10 @@ metadata:
   name: demo-svc
   namespace: default
 spec:
-  nodeSelector:
-    matchLabels:
-      node-role.kubernetes.io/worker: ""
+  snat:
+    nodeSelector:
+      matchLabels:
+        node-role.kubernetes.io/worker: ""
 
 $ kubectl apply -f egress-service.yaml
 egressservice.k8s.ovn.org/demo-svc created
@@ -152,9 +161,10 @@ $ kubectl describe egressservice demo-svc
 Name:         demo-svc
 Namespace:    default
 Spec:
-  Node Selector:
-    Match Labels:
-      node-role.kubernetes.io/worker:  ""
+  Snat:
+    Node Selector:
+      Match Labels:
+        node-role.kubernetes.io/worker:  ""
 Status:
   Host:  ovn-worker2
 ```
@@ -215,9 +225,10 @@ $ kubectl describe egressservice demo-svc
 Name:         demo-svc
 Namespace:    default
 Spec:
-  Node Selector:
-    Match Labels:
-      node-role.kubernetes.io/worker:  ""
+  Snat:
+    Node Selector:
+      Match Labels:
+        node-role.kubernetes.io/worker:  ""
 Status:
   Host:  ovn-worker
 ```
@@ -309,9 +320,9 @@ No resources found
 ```
 
 ### Network
-In addition, an `EgressService` supports a `network` field.
-When it is specified the relevant `ovnkube-node` takes care of creating additional ip rules on its host.
-Assuming an `EgressService` has `Network: blue`, a ClusterIP of 10.96.135.5 and its endpoints are 10.244.0.3 and 10.244.1.6, the following ip rules will be created on the host:
+The `EgressService` supports a `network` field to specify to which network the egress traffic of the service should be steered to.
+When it is specified the relevant `ovnkube-nodes` take care of creating ip rules on their host.
+Assuming an `EgressService` has `Network: blue`, a ClusterIP of 10.96.135.5 and its endpoints are 10.244.0.3 and 10.244.1.6 the following will be created on the host:
 
 ```none
 $ ip rule list
@@ -325,6 +336,8 @@ An ip rule is also created for the ClusterIP of the service which is needed in o
 `lb ip -> node -> enter ovn with ClusterIP -> exit ovn with ClusterIP -> exit node with lb ip`
 
 If the routing table does not exist on the host these rules will not be created and an error will be logged.
+If the host of the resource is `ALL`, only the endpoints local to the node will have an ip rule created.
+
 ### TBD: Dealing with non SNATed traffic
 The host of an Egress Service is often in charge of pods (endpoints) that run in different nodes.  
 Due to the fact that ovn-controllers on different nodes apply the changes independently, there is
@@ -380,9 +393,10 @@ metadata:
   name: example-service
   namespace: some-namespace
 spec:
-  nodeSelector:
-    matchLabels:
-      node-role.kubernetes.io/worker: ""
+  snat:
+    nodeSelector:
+      matchLabels:
+        node-role.kubernetes.io/worker: ""
 ```
 
 3. Advertise the service from the node in charge of the service's traffic. So far the service is "broken" - it is not reachable from outside the cluster and if the pods try to send traffic outside it would probably not come back as it is SNATed to an IP which is unknown.
