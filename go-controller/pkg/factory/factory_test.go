@@ -181,9 +181,11 @@ func newEgressService(name, namespace string) *egressservice.EgressService {
 	return &egressservice.EgressService{
 		ObjectMeta: newObjectMeta(name, namespace),
 		Spec: egressservice.EgressServiceSpec{
-			NodeSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"kubernetes.io/hostname": "node",
+			SNAT: &egressservice.EgressServiceSNAT{
+				NodeSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"kubernetes.io/hostname": "node",
+					},
 				},
 			},
 		},
@@ -1743,7 +1745,7 @@ var _ = Describe("Watch Factory Operations", func() {
 			UpdateFunc: func(old, new interface{}) {
 				newEgressService := new.(*egressservice.EgressService)
 				Expect(reflect.DeepEqual(newEgressService, added)).To(BeTrue())
-				Expect(newEgressService.Spec.NodeSelector).To(Equal(metav1.LabelSelector{
+				Expect(newEgressService.Spec.SNAT.NodeSelector).To(Equal(metav1.LabelSelector{
 					MatchLabels: map[string]string{
 						"kubernetes.io/hostname": "node2",
 					},
@@ -1758,7 +1760,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		egressServices = append(egressServices, added)
 		egressServiceWatch.Add(added)
 		Eventually(c.getAdded, 2).Should(Equal(1))
-		added.Spec.NodeSelector = metav1.LabelSelector{
+		added.Spec.SNAT.NodeSelector = metav1.LabelSelector{
 			MatchLabels: map[string]string{
 				"kubernetes.io/hostname": "node2",
 			},
