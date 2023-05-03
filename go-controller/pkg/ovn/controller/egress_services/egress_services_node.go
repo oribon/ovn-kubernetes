@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -299,7 +300,12 @@ func (c *Controller) syncNode(key string) error {
 	}
 
 	nodeReady := nodeIsReady(n)
-	nodeLabels := n.Labels
+	nodeLabels := map[string]string{}
+	for k, v := range n.Labels {
+		// we copy to avoid a race with a read onNodeUpdate
+		// when we delete a label from the cache later
+		nodeLabels[k] = v
+	}
 	if state == nil {
 		if nodeReady {
 			// The node has no allocated services and is ready, this means unallocated services whose labels match
@@ -309,6 +315,16 @@ func (c *Controller) syncNode(key string) error {
 					c.egressServiceQueue.Add(svcKey)
 				}
 			}
+		}
+
+		labelsToRemove := map[string]any{}
+		for labelKey := range nodeLabels {
+			if strings.HasPrefix(labelKey, egressSVCLabelPrefix) {
+				labelsToRemove[labelKey] = nil // Patching with a nil value results in the delete of the key
+			}
+		}
+		if len(labelsToRemove) > 0 {
+			return c.patchNodeLabels(n.Name, labelsToRemove)
 		}
 
 		return nil
@@ -356,11 +372,32 @@ func (c *Controller) syncNode(key string) error {
 
 	// Label the node again for all of the current valid allocations in case
 	// the user manually changed it.
+	// We also remove labels that belong to a service not allocated to this node.
+	validLabels := sets.New[string]()
 	for svcKey := range state.allocations {
-		namespace, name, _ := cache.SplitMetaNamespaceKey(svcKey)
-		err := c.labelNodeForService(namespace, name, state.name)
+		namespace, name, err := cache.SplitMetaNamespaceKey(svcKey)
 		if err != nil {
 			return err
+		}
+		err = c.labelNodeForService(namespace, name, state.name)
+		if err != nil {
+			return err
+		}
+		validLabels.Insert(c.nodeLabelForService(namespace, name))
+	}
+	labelsToRemove := map[string]any{}
+	for labelKey := range nodeLabels {
+		if strings.HasPrefix(labelKey, egressSVCLabelPrefix) && !validLabels.Has(labelKey) {
+			labelsToRemove[labelKey] = nil // Patching with a nil value results in the delete of the key
+		}
+	}
+	if len(labelsToRemove) > 0 {
+		err = c.patchNodeLabels(n.Name, labelsToRemove)
+		if err != nil {
+			return err
+		}
+		for label := range labelsToRemove {
+			delete(state.labels, label)
 		}
 	}
 
