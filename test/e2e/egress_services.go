@@ -90,6 +90,8 @@ kind: EgressService
 metadata:
   name: ` + serviceName + `
   namespace: ` + f.Namespace.Name + `
+spec:
+  snat: {}
 `)
 
 			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
@@ -141,6 +143,7 @@ metadata:
   name: ` + serviceName + `
   namespace: ` + f.Namespace.Name + `
 spec:
+  snat: {}
   network: "100"
 `)
 			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
@@ -198,6 +201,128 @@ spec:
 		ginkgotable.Entry("ipv6 pods", v1.IPv6Protocol, &externalIPv6),
 	)
 
+	ginkgotable.DescribeTable("Should validate pods' egress uses Network without SNAT",
+		func(protocol v1.IPFamily, dstIP *string) {
+			ginkgo.By("Creating the backend pods")
+			podsCreateSync := errgroup.Group{}
+			for i, name := range pods {
+				name := name
+				i := i
+				podsCreateSync.Go(func() error {
+					p, err := createGenericPodWithLabel(f, name, nodes[i].Name, f.Namespace.Name, command, podsLabels)
+					if p != nil {
+						framework.Logf("%s podIPs are: %v", p.Name, p.Status.PodIPs)
+					}
+					return err
+				})
+			}
+
+			err := podsCreateSync.Wait()
+			framework.ExpectNoError(err, "failed to create backend pods")
+
+			ginkgo.By("Creating an egress service with custom network without SNAT")
+			egressServiceConfig := fmt.Sprintf(`
+apiVersion: k8s.ovn.org/v1
+kind: EgressService
+metadata:
+  name: ` + serviceName + `
+  namespace: ` + f.Namespace.Name + `
+spec:
+  network: "100"
+`)
+
+			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
+				framework.Failf("Unable to write CRD config to disk: %v", err)
+			}
+			defer func() {
+				if err := os.Remove(egressServiceYAML); err != nil {
+					framework.Logf("Unable to remove the CRD config from disk: %v", err)
+				}
+			}()
+			framework.RunKubectlOrDie(f.Namespace.Name, "create", "-f", egressServiceYAML)
+			svc := createLBServiceWithIngressIP(f.ClientSet, f.Namespace.Name, serviceName, protocol, podsLabels, podHTTPPort)
+			svcIP := svc.Status.LoadBalancer.Ingress[0].IP
+
+			ginkgo.By("Creating the custom network")
+			setCustomRoutingTableOnNodes(nodes, customRoutingTable, externalIPv4, externalIPv6, protocol == v1.IPv4Protocol)
+
+			ginkgo.By("Verifying the pods can't reach the external container due to the blackhole in the custom network")
+			gomega.Consistently(func() error {
+				for _, pod := range pods {
+					err := curlAgnHostClientIPFromPod(f.Namespace.Name, pod, svcIP, *dstIP, podHTTPPort)
+					if err != nil && !strings.Contains(err.Error(), "exit code 28") {
+						return fmt.Errorf("expected err to be a connection timed out due to blackhole, got: %w", err)
+					}
+
+					if err == nil {
+						return fmt.Errorf("pod %s managed to reach external client despite blackhole", pod)
+					}
+				}
+				return nil
+			}, 2*time.Second, 400*time.Millisecond).ShouldNot(gomega.HaveOccurred(), "managed to reach external container despite blackhole")
+
+			ginkgo.By("Removing the blackhole to the external container the pods should be able to reach it with the loadbalancer's ingress ip")
+			delExternalClientBlackholeFromNodes(nodes, customRoutingTable, externalIPv4, externalIPv6, protocol == v1.IPv4Protocol)
+			for i, pod := range pods {
+				node := &nodes[i]
+				v4, v6 := getNodeAddresses(node)
+				expected := v4
+				if utilnet.IsIPv6String(svcIP) {
+					expected = v6
+				}
+
+				gomega.Eventually(func() error {
+					return curlAgnHostClientIPFromPod(f.Namespace.Name, pod, expected, *dstIP, podHTTPPort)
+				}, 3*time.Second, 500*time.Millisecond).ShouldNot(gomega.HaveOccurred(), "failed to reach external container with node's ip")
+
+				gomega.Consistently(func() error {
+					return curlAgnHostClientIPFromPod(f.Namespace.Name, pod, expected, *dstIP, podHTTPPort)
+				}, 1*time.Second, 200*time.Millisecond).ShouldNot(gomega.HaveOccurred(), "failed to reach external container with node's ip")
+			}
+
+			// Re-adding the blackhole and deleting the EgressService to verify that the pods go back to use the main network.
+			ginkgo.By("Re-adding the blackhole the pods should not be able to reach the external container")
+			setCustomRoutingTableOnNodes(nodes, customRoutingTable, externalIPv4, externalIPv6, protocol == v1.IPv4Protocol)
+
+			ginkgo.By("Verifying the pods can't reach the external container due to the blackhole in the custom network")
+			gomega.Consistently(func() error {
+				for _, pod := range pods {
+					err := curlAgnHostClientIPFromPod(f.Namespace.Name, pod, svcIP, *dstIP, podHTTPPort)
+					if err != nil && !strings.Contains(err.Error(), "exit code 28") {
+						return fmt.Errorf("expected err to be a connection timed out due to blackhole, got: %w", err)
+					}
+
+					if err == nil {
+						return fmt.Errorf("pod %s managed to reach external client despite blackhole", pod)
+					}
+				}
+				return nil
+			}, 2*time.Second, 400*time.Millisecond).ShouldNot(gomega.HaveOccurred(), "managed to reach external container despite blackhole")
+
+			ginkgo.By("Deleting the EgressService the backend pods should exit with their node's IP (via the main network)")
+			framework.RunKubectlOrDie(f.Namespace.Name, "delete", "-f", egressServiceYAML)
+
+			for i, pod := range pods {
+				node := &nodes[i]
+				v4, v6 := getNodeAddresses(node)
+				expected := v4
+				if utilnet.IsIPv6String(svcIP) {
+					expected = v6
+				}
+
+				gomega.Eventually(func() error {
+					return curlAgnHostClientIPFromPod(f.Namespace.Name, pod, expected, *dstIP, podHTTPPort)
+				}, 3*time.Second, 500*time.Millisecond).ShouldNot(gomega.HaveOccurred(), "failed to reach external container with node's ip")
+
+				gomega.Consistently(func() error {
+					return curlAgnHostClientIPFromPod(f.Namespace.Name, pod, expected, *dstIP, podHTTPPort)
+				}, 1*time.Second, 200*time.Millisecond).ShouldNot(gomega.HaveOccurred(), "failed to reach external container with node's ip")
+			}
+		},
+		ginkgotable.Entry("ipv4 pods", v1.IPv4Protocol, &externalIPv4),
+		ginkgotable.Entry("ipv6 pods", v1.IPv6Protocol, &externalIPv6),
+	)
+
 	ginkgotable.DescribeTable("Should validate the egress SVC SNAT functionality against host-networked pods",
 		func(protocol v1.IPFamily) {
 			ginkgo.By("Creating the backend pods")
@@ -224,6 +349,8 @@ kind: EgressService
 metadata:
   name: ` + serviceName + `
   namespace: ` + f.Namespace.Name + `
+spec:
+  snat: {}
 `)
 
 			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
@@ -329,9 +456,10 @@ metadata:
   name: ` + serviceName + `
   namespace: ` + f.Namespace.Name + `
 spec:
-  nodeSelector:
-    matchLabels:
-      kubernetes.io/hostname: ` + firstNode + `
+  snat:
+    nodeSelector:
+      matchLabels:
+        kubernetes.io/hostname: ` + firstNode + `
 `)
 
 			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
@@ -382,9 +510,10 @@ metadata:
   name: ` + serviceName + `
   namespace: ` + f.Namespace.Name + `
 spec:
-  nodeSelector:
-    matchLabels:
-      kubernetes.io/hostname: ` + secondNode + `
+  snat:
+    nodeSelector:
+      matchLabels:
+        kubernetes.io/hostname: ` + secondNode + `
 `)
 			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
 				framework.Failf("Unable to write CRD config to disk: %v", err)
@@ -428,9 +557,10 @@ metadata:
   name: ` + serviceName + `
   namespace: ` + f.Namespace.Name + `
 spec:
-  nodeSelector:
-    matchLabels:
-      perfect: match
+  snat:
+    nodeSelector:
+      matchLabels:
+        perfect: match
 `)
 			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
 				framework.Failf("Unable to write CRD config to disk: %v", err)
@@ -544,6 +674,8 @@ kind: EgressService
 metadata:
   name: ` + serviceName + `
   namespace: ` + f.Namespace.Name + `
+spec:
+  snat: {}
 `)
 
 			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
@@ -677,9 +809,10 @@ metadata:
   name: ` + serviceName + `
   namespace: ` + f.Namespace.Name + `
 spec:
-  nodeSelector:
-    matchLabels:
-      kubernetes.io/hostname: ` + firstNode + `
+  snat:
+    nodeSelector:
+      matchLabels:
+        kubernetes.io/hostname: ` + firstNode + `
 `)
 
 			if err := os.WriteFile(egressServiceYAML, []byte(egressServiceConfig), 0644); err != nil {
@@ -923,7 +1056,7 @@ func setSVCRouteOnContainer(container, svcIP, v4Via, v6Via string) {
 // Returns an error if the expectedIP is different than the response.
 func curlAgnHostClientIPFromPod(namespace, pod, expectedIP, dstIP string, containerPort int) error {
 	dst := net.JoinHostPort(dstIP, fmt.Sprint(containerPort))
-	curlCmd := fmt.Sprintf("curl -s --retry-connrefused --retry 3 --max-time 0.5 http://%s/clientip", dst)
+	curlCmd := fmt.Sprintf("curl -s --retry-connrefused --retry 2 --max-time 0.5 --connect-timeout 0.5 --retry-delay 1 http://%s/clientip", dst)
 	out, err := framework.RunHostCmd(namespace, pod, curlCmd)
 	if err != nil {
 		return fmt.Errorf("failed to curl agnhost on %s from %s, err: %w", dstIP, pod, err)
@@ -992,10 +1125,10 @@ func setRoutesOnCustomRoutingTable(container, ip, table string) {
 	gomega.Expect(routes).ToNot(gomega.HaveLen(0))
 
 	routeTo := routes[0]
-	out, err = runCommand(containerRuntime, "exec", container, "ip", "route", "add", ip, "dev", routeTo.Dev, "table", table, "prio", "100")
+	out, err = runCommand(containerRuntime, "exec", container, "ip", "route", "replace", ip, "dev", routeTo.Dev, "table", table, "prio", "100")
 	framework.ExpectNoError(err, fmt.Sprintf("failed to set route to %s on node %s table %s, out: %s", ip, container, table, out))
 
-	out, err = runCommand(containerRuntime, "exec", container, "ip", "route", "add", "blackhole", ip, "table", table, "prio", "50")
+	out, err = runCommand(containerRuntime, "exec", container, "ip", "route", "replace", "blackhole", ip, "table", table, "prio", "50")
 	framework.ExpectNoError(err, fmt.Sprintf("failed to set blackhole route to %s on node %s table %s, out: %s", ip, container, table, out))
 }
 
