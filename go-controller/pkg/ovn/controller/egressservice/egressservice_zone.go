@@ -41,6 +41,7 @@ import (
 const (
 	maxRetries       = 10
 	svcExternalIDKey = "EgressSVC" // key set on lrps to identify to which egress service it belongs
+	noSNATHost       = "ALL"       // host key set on status when the service has sourceIPBy != LBIP
 )
 
 type InitClusterEgressPoliciesFunc func(client libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
@@ -330,7 +331,7 @@ func (c *Controller) repair() error {
 		}
 
 		svcHost := es.Status.Host
-		if svcHost == "" {
+		if svcHost == "" || svcHost == noSNATHost {
 			continue
 		}
 
@@ -660,7 +661,16 @@ func (c *Controller) syncEgressService(key string) error {
 		return c.clearServiceResourcesAndRequeue(key, state)
 	}
 
-	// At this point both the EgressService is assigned and the Service != nil
+	// We check if it its host == noSNATHost (cluster manager detected sourceIPBy != LoadBalancerIP)
+	// to determine if we need to clean its resources and stop processing or not.
+	if es.Status.Host == noSNATHost {
+		if state == nil {
+			// The service does not need SNAT LRPs and was not an allocated egress service.
+			return nil
+		}
+
+		return c.clearServiceResourcesAndRequeue(key, state)
+	}
 
 	if state != nil && state.stale {
 		// The service is marked stale because something failed when trying to delete it.

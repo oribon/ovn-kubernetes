@@ -28,6 +28,7 @@ import (
 const (
 	maxRetries           = 10
 	egressSVCLabelPrefix = "egress-service.k8s.ovn.org"
+	noSNATHost           = "ALL" // host key set on status when the service has sourceIPBy != LBIP
 )
 
 // Controller represents the global egressservice controller
@@ -241,6 +242,11 @@ func (c *Controller) repair() error {
 			klog.Errorf("Failed to read EgressService key: %v", err)
 			continue
 		}
+
+		if es.Spec.SourceIPBy != egressserviceapi.SourceIPLoadBalancer {
+			continue
+		}
+
 		svc := allServices[key]
 		if svc == nil {
 			continue
@@ -322,6 +328,13 @@ func (c *Controller) repair() error {
 		key, err := cache.MetaNamespaceKeyFunc(es)
 		if err != nil {
 			klog.Errorf("Failed to read EgressService key: %v", err)
+			continue
+		}
+		if es.Spec.SourceIPBy != egressserviceapi.SourceIPLoadBalancer {
+			err := c.setEgressServiceHost(es.Namespace, es.Name, noSNATHost)
+			if err != nil {
+				klog.Errorf("Failed to set %s host entry on EgressService %s, err: %v", noSNATHost, key, err)
+			}
 			continue
 		}
 		_, found := c.services[key]
@@ -479,7 +492,27 @@ func (c *Controller) syncEgressService(key string) error {
 		return c.clearServiceResourcesAndRequeue(key, state)
 	}
 
-	// At this point both the EgressService resource and the Service != nil
+	// At this point the Service has at least one ingress IP and its EgressService != nil.
+	// We check if it its sourceIPBy != LoadBalancerIP to determine if we need to clean its resources,
+	// set host=ALL and stop processing or not.
+	if es.Spec.SourceIPBy != egressserviceapi.SourceIPLoadBalancer {
+		if state == nil {
+			// The service does not need SNAT LRPs and was not an allocated egress service.
+			// We delete it from the unallocated service cache just in case and set its host
+			// to "ALL".
+			delete(c.unallocatedServices, key)
+			return c.setEgressServiceHost(namespace, name, noSNATHost)
+		}
+
+		err := c.clearServiceResourcesAndRequeue(key, state)
+		if err != nil {
+			return err
+		}
+
+		return c.setEgressServiceHost(namespace, name, noSNATHost)
+	}
+
+	// At this point both the EgressService sourceIPBy=LBIP and the Service != nil
 
 	if state != nil && state.stale {
 		// The service is marked stale because something failed when trying to delete it.
