@@ -256,6 +256,13 @@ func (oc *DefaultNetworkController) WatchEgressIP() error {
 	return err
 }
 
+// WatchEgressTrafficClass starts the watching of egresstrafficclass resource and calls back
+// the appropriate handler logic to reconcile EgressIPs that reference the changed EgressTrafficClass.
+func (oc *DefaultNetworkController) WatchEgressTrafficClass() error {
+	_, err := oc.retryEgressTrafficClasses.WatchResource()
+	return err
+}
+
 func (oc *DefaultNetworkController) WatchEgressIPNamespaces() error {
 	_, err := oc.retryEgressIPNamespaces.WatchResource()
 	return err

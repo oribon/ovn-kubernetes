@@ -538,6 +538,8 @@ type OVNKubernetesFeatureConfig struct {
 	EnableAdminNetworkPolicy bool `gcfg:"enable-admin-network-policy"`
 	// EgressIP feature is enabled
 	EnableEgressIP bool `gcfg:"enable-egress-ip"`
+	// EgressTrafficClass feature is enabled (per-destination egress IP routing)
+	EnableEgressTrafficClass bool `gcfg:"enable-egress-traffic-class"`
 	// EgressIP node reachability total timeout in seconds
 	EgressIPReachabiltyTotalTimeout int  `gcfg:"egressip-reachability-total-timeout"`
 	EnableEgressFirewall            bool `gcfg:"enable-egress-firewall"`
@@ -1279,6 +1281,13 @@ var OVNK8sFeatureFlags = []cli.Flag{
 		Usage:       "Use EgressIP CRD feature with ovn-kubernetes.",
 		Destination: &cliConfig.OVNKubernetesFeature.EnableEgressIP,
 		Value:       OVNKubernetesFeature.EnableEgressIP,
+	},
+	&cli.BoolFlag{
+		Name:        "enable-egress-traffic-class",
+		EnvVars:     []string{"OVN_EGRESS_TRAFFIC_CLASS_ENABLE"},
+		Usage:       "Use EgressTrafficClass CRD feature with ovn-kubernetes for per-destination egress IP routing. Implies --enable-egress-ip.",
+		Destination: &cliConfig.OVNKubernetesFeature.EnableEgressTrafficClass,
+		Value:       OVNKubernetesFeature.EnableEgressTrafficClass,
 	},
 	&cli.IntFlag{
 		Name:        "egressip-reachability-total-timeout",
@@ -2427,6 +2436,10 @@ func buildOVNKubernetesFeatureConfig(cli, file *config) error {
 	if OVNKubernetesFeature.EnableUplink && !OVNKubernetesFeature.EnableNetworkSegmentation {
 		return fmt.Errorf("the Uplink feature cannot be enabled without also enabling Network Segmentation")
 	}
+	if OVNKubernetesFeature.EnableEgressTrafficClass {
+		OVNKubernetesFeature.EnableEgressIP = true
+	}
+
 	return nil
 }
 
