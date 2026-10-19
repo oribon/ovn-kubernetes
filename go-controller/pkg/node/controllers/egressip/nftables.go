@@ -33,6 +33,14 @@ func (c *Controller) initNFTables() error {
 		Priority: knftables.PtrTo(knftables.SNATPriority),
 	})
 	tx.Flush(&knftables.Chain{Name: types.EgressIPNFTablesChainName})
+	if ovnconfig.OVNKubernetesFeature.EnableEgressTrafficClass {
+		tx.Add(&knftables.Chain{Name: selectiveSNATChain})
+		tx.Add(&knftables.Rule{Chain: types.EgressIPNFTablesChainName, Rule: "jump " + selectiveSNATChain})
+	} else {
+		tx.Add(&knftables.Chain{Name: selectiveSNATChain})
+		tx.Flush(&knftables.Chain{Name: selectiveSNATChain})
+		tx.Delete(&knftables.Chain{Name: selectiveSNATChain})
+	}
 
 	if c.v4 {
 		tx.Add(&knftables.Map{
