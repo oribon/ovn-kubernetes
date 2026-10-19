@@ -68,6 +68,7 @@ rules:
       verbs: [ "create", "delete" ]
     - apiGroups: ["k8s.ovn.org"]
       resources:
+          - egresstrafficclasses
           - egressips
           - egressservices
           - adminpolicybasedexternalroutes

@@ -127,6 +127,7 @@ usage() {
     echo "-dp  | --disable-pkt-mtu-check                Disable checking for packets mtu size. DEFAULT: false"
     echo "-is  | --ipsec                                Enable IPsec. DEFAULT: false"
     echo "-sm  | --scale-metrics                        Enable scale metrics. DEFAULT: false"
+    echo "--enable-egress-traffic-class               Enable EgressTrafficClass destination/L4 routing."
     echo "-ehp | --egress-ip-healthcheck-port           TCP port used for gRPC session by egress IP node check. DEFAULT: 9107 (Use \"0\" for legacy dial to port 9)."
     echo "-nf  | --netflow-targets                      A comma-separated set of NetFlow collectors to export flow data. DEFAULT: Disabled"
     echo "-sf  | --sflow-targets                        A comma-separated set of SFlow collectors to export flow data. DEFAULT: Disabled"
@@ -315,6 +316,8 @@ parse_args() {
                                                   ;;
             -sm | --scale-metrics )               OVN_METRICS_SCALE_ENABLE=true
                                                   ;;
+            --enable-egress-traffic-class ) OVN_EGRESS_TRAFFIC_CLASS_ENABLE=true
+                ;;
             -ehp | --egress-ip-healthcheck-port ) shift
                                                   OVN_EGRESSIP_HEALTHCHECK_PORT=$1
                                                   ;;
@@ -695,6 +698,7 @@ helm upgrade --install ovn-kubernetes . -f "${value_file}" ${extra_values_args} 
           --set global.enableNoOverlay=$(if [ "${ENABLE_NO_OVERLAY}" == "true" ]; then echo "true"; else echo "false"; fi) \
           --set global.enableNoOverlaySnat=$(if [ "${ENABLE_NO_OVERLAY_OUTBOUND_SNAT}" == "true" ]; then echo "true"; else echo "false"; fi) \
           --set global.enableNoOverlayManagedRouting=$(if [ "${ENABLE_NO_OVERLAY_MANAGED_ROUTING}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableEgressTrafficClass="${OVN_EGRESS_TRAFFIC_CLASS_ENABLE}" \
           --set global.enablePersistentIPs=true \
           --set global.enableConfigDuration=true \
           --set global.enableCoredumps=$(if [ "${ENABLE_COREDUMPS}" == "true" ]; then echo "true"; else echo "false"; fi) \
