@@ -23,6 +23,7 @@ import (
 	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
 	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
 	egressqoslisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/listers/egressqos/v1"
+	egresstrafficclassv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egresstrafficclass/v1"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics/recorders"
@@ -118,6 +119,8 @@ type DefaultNetworkController struct {
 
 	// retry framework for egress IP
 	retryEgressIPs *retry.RetryFramework
+	// retry framework for egress IP traffic
+	retryEgressTrafficClasses *retry.RetryFramework
 	// retry framework for egress IP Namespaces
 	retryEgressIPNamespaces *retry.RetryFramework
 	// retry framework for egress IP Pods
@@ -279,6 +282,7 @@ func (oc *DefaultNetworkController) initRetryFramework() {
 	// egress IP (and dependent namespaces, pods, nodes), cloud private ip config.
 	oc.retryPods = oc.newRetryFramework(factory.PodType)
 	oc.retryEgressIPs = oc.newRetryFramework(factory.EgressIPType)
+	oc.retryEgressTrafficClasses = oc.newRetryFramework(factory.EgressTrafficClassType)
 	oc.retryEgressIPNamespaces = oc.newRetryFramework(factory.EgressIPNamespaceType)
 	oc.retryEgressIPPods = oc.newRetryFramework(factory.EgressIPPodType)
 	oc.retryEgressNodes = oc.newRetryFramework(factory.EgressNodeType)
@@ -738,6 +742,11 @@ func (oc *DefaultNetworkController) run(_ context.Context) error {
 			return err
 		}
 	}
+	if config.OVNKubernetesFeature.EnableEgressIP && config.OVNKubernetesFeature.EnableEgressTrafficClass {
+		if err := WithSyncDurationMetric("egress traffic class", oc.WatchEgressTrafficClass); err != nil {
+			return err
+		}
+	}
 
 	if config.OVNKubernetesFeature.EnableEgressFirewall {
 		var err error
@@ -1018,6 +1027,10 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 		eIP := obj.(*egressipv1.EgressIP)
 		return h.oc.eIPC.reconcileEgressIP(nil, eIP)
 
+	case factory.EgressTrafficClassType:
+		trafficClass := obj.(*egresstrafficclassv1.EgressTrafficClass)
+		return h.oc.eIPC.reconcileEgressTrafficClass(trafficClass)
+
 	case factory.EgressIPNamespaceType:
 		namespace := obj.(*corev1.Namespace)
 		return h.oc.eIPC.reconcileEgressIPNamespace(nil, namespace)
@@ -1102,6 +1115,19 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		newEIP := newObj.(*egressipv1.EgressIP)
 		return h.oc.eIPC.reconcileEgressIP(oldEIP, newEIP)
 
+	case factory.EgressTrafficClassType:
+		oldClass := oldObj.(*egresstrafficclassv1.EgressTrafficClass)
+		newClass := newObj.(*egresstrafficclassv1.EgressTrafficClass)
+		// Reconcile EgressIPs matching the old labels only when labels changed,
+		// so EgressIPs that stopped matching are notified. When only destinations
+		// changed (labels unchanged), a single reconcile with the new object suffices.
+		if !reflect.DeepEqual(oldClass.Labels, newClass.Labels) {
+			if err := h.oc.eIPC.reconcileEgressTrafficClass(oldClass); err != nil {
+				return err
+			}
+		}
+		return h.oc.eIPC.reconcileEgressTrafficClass(newClass)
+
 	case factory.EgressIPNamespaceType:
 		oldNamespace := oldObj.(*corev1.Namespace)
 		newNamespace := newObj.(*corev1.Namespace)
@@ -1180,6 +1206,10 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 		eIP := obj.(*egressipv1.EgressIP)
 		return h.oc.eIPC.reconcileEgressIP(eIP, nil)
 
+	case factory.EgressTrafficClassType:
+		trafficClass := obj.(*egresstrafficclassv1.EgressTrafficClass)
+		return h.oc.eIPC.reconcileEgressTrafficClass(trafficClass)
+
 	case factory.EgressIPNamespaceType:
 		namespace := obj.(*corev1.Namespace)
 		return h.oc.eIPC.reconcileEgressIPNamespace(namespace, nil)
@@ -1234,7 +1264,8 @@ func (h *defaultNetworkControllerEventHandler) SyncFunc(objs []interface{}) erro
 			syncFunc = h.oc.eIPC.initClusterEgressPolicies
 
 		case factory.EgressIPNamespaceType,
-			factory.EgressIPType:
+			factory.EgressIPType,
+			factory.EgressTrafficClassType:
 			syncFunc = nil
 
 		case factory.NamespaceType:

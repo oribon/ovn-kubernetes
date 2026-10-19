@@ -10,6 +10,7 @@ import (
 	v1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/informers/externalversions/adminpolicybasedroute/v1"
 	clusternetworkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/informers/externalversions/clusternetworkconnect/v1"
 	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions/egressip/v1"
+	egresstrafficclassv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egresstrafficclass/v1/apis/informers/externalversions/egresstrafficclass/v1"
 	routeadvertisementsv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions/routeadvertisements/v1"
 	v1alpha1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/uplink/v1alpha1/apis/informers/externalversions/uplink/v1alpha1"
 	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions/userdefinednetwork/v1"
@@ -252,6 +253,26 @@ func (_m *NodeWatchFactory) EgressIPInformer() egressipv1.EgressIPInformer {
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(egressipv1.EgressIPInformer)
+		}
+	}
+
+	return r0
+}
+
+// EgressTrafficClassInformer provides a mock function with no fields
+func (_m *NodeWatchFactory) EgressTrafficClassInformer() egresstrafficclassv1.EgressTrafficClassInformer {
+	ret := _m.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for EgressTrafficClassInformer")
+	}
+
+	var r0 egresstrafficclassv1.EgressTrafficClassInformer
+	if rf, ok := ret.Get(0).(func() egresstrafficclassv1.EgressTrafficClassInformer); ok {
+		r0 = rf()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(egresstrafficclassv1.EgressTrafficClassInformer)
 		}
 	}
 

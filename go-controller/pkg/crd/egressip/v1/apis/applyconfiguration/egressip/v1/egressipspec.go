@@ -14,6 +14,10 @@ import (
 //
 // EgressIPSpec is a desired state description of EgressIP.
 type EgressIPSpecApplyConfiguration struct {
+	// TrafficSelector selects EgressTrafficClasses whose destinations use this EgressIP.
+	// When omitted, this EgressIP applies to all egress traffic.
+	// Expression operators and value counts must form a valid Kubernetes label selector.
+	TrafficSelector *metav1.LabelSelectorApplyConfiguration `json:"trafficSelector,omitempty"`
 	// EgressIPs is the list of egress IP addresses requested. Can be IPv4 and/or IPv6.
 	// This field is mandatory.
 	EgressIPs []string `json:"egressIPs,omitempty"`
@@ -47,6 +51,14 @@ type EgressIPSpecApplyConfiguration struct {
 // apply.
 func EgressIPSpec() *EgressIPSpecApplyConfiguration {
 	return &EgressIPSpecApplyConfiguration{}
+}
+
+// WithTrafficSelector sets the TrafficSelector field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the TrafficSelector field is set to the value of the last call.
+func (b *EgressIPSpecApplyConfiguration) WithTrafficSelector(value *metav1.LabelSelectorApplyConfiguration) *EgressIPSpecApplyConfiguration {
+	b.TrafficSelector = value
+	return b
 }
 
 // WithEgressIPs adds the given value to the EgressIPs field in the declarative configuration

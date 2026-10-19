@@ -1224,18 +1224,29 @@ func updateIPTablesRulesForNode(op, nodeName string, ipTablesArgs []string, ipv6
 	if ipv6 {
 		iptables = "ip6tables"
 	}
-	_, err := infraprovider.Get().ExecK8NodeCommand(nodeName, append([]string{iptables, "-v", "--check"}, ipTablesArgs...))
+	// Remote Podman can lose output on nonzero exits; return the child status in stdout.
+	checkArgs := append([]string{"sh", "-c", `"$@" 2>&1; printf '\n%d\n' "$?"`, "--", iptables, "-v", "--check"}, ipTablesArgs...)
+	output, err := infraprovider.Get().ExecK8NodeCommand(nodeName, checkArgs)
+	framework.ExpectNoError(err, "failed to check %s rule on node %s", iptables, nodeName)
+	output = strings.TrimSuffix(output, "\n")
+	separator := strings.LastIndexByte(output, '\n')
+	if separator < 0 {
+		framework.Failf("missing %s check status on node %s: %q", iptables, nodeName, output)
+	}
+	status, err := strconv.Atoi(output[separator+1:])
+	framework.ExpectNoError(err, "invalid %s check status on node %s", iptables, nodeName)
+	output = output[:separator]
 	// errors known to be equivalent to not found
 	notFound1 := "No chain/target/match by that name"
 	notFound2 := "does a matching rule exist in that chain?"
-	notFound := err != nil && (strings.Contains(err.Error(), notFound1) || strings.Contains(err.Error(), notFound2))
-	if err != nil && !notFound {
-		framework.Failf("failed to check existence of %s rule on node %s: %v", iptables, nodeName, err)
+	notFound := status != 0 && (strings.Contains(output, notFound1) || strings.Contains(output, notFound2))
+	if status != 0 && !notFound {
+		framework.Failf("failed to check existence of %s rule on node %s (exit %d): %s", iptables, nodeName, status, output)
 	}
 	if op == "delete" && notFound {
 		// rule is not there
 		return
-	} else if op == "insert" && err == nil {
+	} else if op == "insert" && status == 0 {
 		// rule is already there
 		return
 	}

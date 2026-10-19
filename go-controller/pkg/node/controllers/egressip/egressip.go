@@ -42,6 +42,8 @@ import (
 	eipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
 	egressipinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions/egressip/v1"
 	egressiplisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
+	trafficinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egresstrafficclass/v1/apis/informers/externalversions/egresstrafficclass/v1"
+	trafficlister "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egresstrafficclass/v1/apis/listers/egresstrafficclass/v1"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/iprulemanager"
@@ -56,10 +58,11 @@ import (
 )
 
 const (
-	rulePriority         = 6000 // the priority of the ip routing rules created by the controller. Egress Service priority is 5000.
+	rulePriority         = 6001 // the priority of the ip routing rules created by the controller. Egress Service priority is 5000.
 	ruleFwMarkPriority   = 4999 // bypass EgressService (5000) and EgressIP (6000) rules for traffic to node IPs in LGW.
 	legacyFwMarkPriority = 5999 // former bypass priority, removed precisely on upgrade.
 	maxRetries           = 15
+	ruleTrafficPriority  = 6000
 )
 
 var (
@@ -115,13 +118,16 @@ type getActiveNetworkForNamespaceFn func(namespace string) (util.NetInfo, error)
 
 // Controller implement Egress IP for secondary host networks
 type Controller struct {
-	eIPLister         egressiplisters.EgressIPLister
-	eIPInformer       cache.SharedIndexInformer
-	eIPQueue          workqueue.TypedRateLimitingInterface[string]
-	nodeLister        corelisters.NodeLister
-	namespaceLister   corelisters.NamespaceLister
-	namespaceInformer cache.SharedIndexInformer
-	namespaceQueue    workqueue.TypedRateLimitingInterface[*corev1.Namespace]
+	configurationMutex sync.Mutex
+	trafficInformer    cache.SharedIndexInformer
+	trafficLister      trafficlister.EgressTrafficClassLister
+	eIPLister          egressiplisters.EgressIPLister
+	eIPInformer        cache.SharedIndexInformer
+	eIPQueue           workqueue.TypedRateLimitingInterface[string]
+	nodeLister         corelisters.NodeLister
+	namespaceLister    corelisters.NamespaceLister
+	namespaceInformer  cache.SharedIndexInformer
+	namespaceQueue     workqueue.TypedRateLimitingInterface[*corev1.Namespace]
 
 	podLister                    corelisters.PodLister
 	podInformer                  cache.SharedIndexInformer
@@ -148,7 +154,7 @@ type Controller struct {
 	v6                bool
 }
 
-func NewController(k kube.Interface, eIPInformer egressipinformer.EgressIPInformer, nodeInformer cache.SharedIndexInformer,
+func NewController(k kube.Interface, eIPInformer egressipinformer.EgressIPInformer, trafficInformer trafficinformer.EgressTrafficClassInformer, nodeInformer cache.SharedIndexInformer,
 	namespaceInformer coreinformers.NamespaceInformer, podInformer coreinformers.PodInformer, getActiveNetworkForNamespaceFn getActiveNetworkForNamespaceFn,
 	routeManager *routemanager.Controller, v4, v6 bool, nodeName string, linkManager *linkmanager.Controller) (*Controller, error) {
 
@@ -185,6 +191,10 @@ func NewController(k kube.Interface, eIPInformer egressipinformer.EgressIPInform
 		v4:                           v4,
 		v6:                           v6,
 	}
+	if ovnconfig.OVNKubernetesFeature.EnableEgressTrafficClass {
+		c.trafficInformer = trafficInformer.Informer()
+		c.trafficLister = trafficInformer.Lister()
+	}
 	return c, nil
 }
 
@@ -192,6 +202,21 @@ func NewController(k kube.Interface, eIPInformer egressipinformer.EgressIPInform
 // need to be mirrored in test function setupFakeTestNode
 func (c *Controller) Run(stopCh <-chan struct{}, wg *sync.WaitGroup, threads int) error {
 	klog.Info("Starting Egress IP Controller")
+	if c.trafficInformer != nil {
+		_, err := c.trafficInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    c.onTrafficClassChange,
+			UpdateFunc: func(old, new interface{}) { c.onTrafficClassUpdate(old, new) },
+			DeleteFunc: c.onTrafficClassChange,
+		})
+		if err != nil {
+			return err
+		}
+		if !util.WaitForInformerCacheSyncWithTimeout("egresstrafficclass", stopCh, c.trafficInformer.HasSynced) {
+			return fmt.Errorf("timed out waiting for EgressTrafficClass cache")
+		}
+
+	}
+
 	_, err := c.namespaceInformer.AddEventHandler(
 		factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
 			AddFunc:    c.onNamespaceAdd,
@@ -257,6 +282,9 @@ func (c *Controller) Run(stopCh <-chan struct{}, wg *sync.WaitGroup, threads int
 
 	// Tell rule manager that we want to fully own all rules at a particular priority.
 	// Any rules created with this priority that we do not recognize will be removed.
+	if err := c.ruleManager.OwnPriority(ruleTrafficPriority); err != nil {
+		return err
+	}
 	if err := c.ruleManager.OwnPriority(rulePriority); err != nil {
 		return fmt.Errorf("failed to own priority %d for IP rules: %v", rulePriority, err)
 	}
@@ -310,6 +338,29 @@ func (c *Controller) Run(stopCh <-chan struct{}, wg *sync.WaitGroup, threads int
 		})
 	if err != nil {
 		return fmt.Errorf("failed to run EgressIP controller because repairing node failed: %v", err)
+	}
+
+	if c.trafficInformer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(6 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopCh:
+					return
+				case <-ticker.C:
+					func() {
+						c.configurationMutex.Lock()
+						defer c.configurationMutex.Unlock()
+						if err := c.syncSelectiveSNAT(); err != nil {
+							klog.Errorf("Failed to reconcile selective EgressIP SNAT: %v", err)
+						}
+					}()
+				}
+			}
+		}()
 	}
 
 	for i := 0; i < threads; i++ {
@@ -430,6 +481,8 @@ func (c *Controller) processNextEIPWorkItem(wg *sync.WaitGroup) bool {
 }
 
 func (c *Controller) syncEIP(eIPName string) error {
+	c.configurationMutex.Lock()
+	defer c.configurationMutex.Unlock()
 	// 1. Lock on the existing 'state', as we are going to use it for cleanup and update.
 	// 2. Build latest 'config'. This includes listing referenced namespaces and pods.
 	// To make sure there is no race with pod and namespace handlers, referencedObjects is acquired
@@ -462,8 +515,11 @@ func (c *Controller) syncEIP(eIPName string) error {
 			existing = newState()
 			c.cache.Store(eIPName, existing)
 		}
-		if err = c.updateEIP(existing, update); err != nil {
-			return fmt.Errorf("failed to update policy from %+v to %+v: %w", existing, update, err)
+		if err = c.updateEIP(eIPName, existing, update); err != nil {
+			return utilerrors.Join(fmt.Errorf("failed to update policy from %+v to %+v: %w", existing, update, err), c.syncSelectiveSNAT())
+		}
+		if err := c.syncSelectiveSNAT(); err != nil {
+			return err
 		}
 		if update == nil {
 			c.cache.Delete(eIPName)
@@ -507,6 +563,13 @@ func (c *Controller) processEIP(eip *eipv1.EgressIP) (*eIPConfig, sets.Set[strin
 	selectedPods := sets.Set[ktypes.NamespacedName]{}
 	selectedNamespacesPodIPs := map[string]map[ktypes.NamespacedName]*podIPConfigList{}
 	var eipSpecificConfig *eIPConfig
+	destinations, selected, err := c.destinationMatches(eip)
+	if err != nil {
+		return nil, selectedNamespaces, selectedPods, selectedNamespacesPodIPs, err
+	}
+	if selected && len(destinations) == 0 {
+		return nil, selectedNamespaces, selectedPods, selectedNamespacesPodIPs, nil
+	}
 	parsedNodeEIPConfig, err := c.getNodeEgressIPConfig()
 	if err != nil {
 		return nil, selectedNamespaces, selectedPods, selectedNamespacesPodIPs,
@@ -575,13 +638,13 @@ func (c *Controller) processEIP(eip *eipv1.EgressIP) (*eIPConfig, sets.Set[strin
 				if selectedNamespacesPodIPs[namespace.Name] == nil {
 					selectedNamespacesPodIPs[namespace.Name] = make(map[ktypes.NamespacedName]*podIPConfigList)
 				}
-				selectedNamespacesPodIPs[namespace.Name][podNamespaceName] = generatePodConfig(ips, link, ip, isEIPV6)
+				selectedNamespacesPodIPs[namespace.Name][podNamespaceName] = generatePodConfig(ips, link, ip, isEIPV6, destinations, selected)
 				selectedPods.Insert(podNamespaceName)
 			}
 		}
 		// ensure at least one pod is selected before generating config
 		if len(selectedNamespacesPodIPs) > 0 {
-			eipSpecificConfig, err = generateEIPConfig(link, ip, isEIPV6)
+			eipSpecificConfig, err = generateEIPConfig(link, ip, isEIPV6, destinations, selected)
 			if err != nil {
 				return nil, selectedNamespaces, selectedPods, selectedNamespacesPodIPs,
 					fmt.Errorf("failed to generate EIP configuration for EgressIP %s IP %s: %v", eip.Name, status.EgressIP, err)
@@ -593,7 +656,7 @@ func (c *Controller) processEIP(eip *eipv1.EgressIP) (*eIPConfig, sets.Set[strin
 	return eipSpecificConfig, selectedNamespaces, selectedPods, selectedNamespacesPodIPs, nil
 }
 
-func generatePodConfig(podIPs []net.IP, link netlink.Link, eIP net.IP, isEIPV6 bool) *podIPConfigList {
+func generatePodConfig(podIPs []net.IP, link netlink.Link, eIP net.IP, isEIPV6 bool, destinations []egressip.Destination, selected bool) *podIPConfigList {
 	newPodIPConfigs := newPodIPConfigList()
 	for _, podIP := range podIPs {
 		isPodIPv6 := utilnet.IsIPv6(podIP)
@@ -606,17 +669,36 @@ func generatePodConfig(podIPs []net.IP, link netlink.Link, eIP net.IP, isEIPV6 b
 		ipConfig.ifName = link.Attrs().Name
 		ipConfig.ipRule = generateIPRule(podIP, isPodIPv6, link.Attrs().Index)
 		ipConfig.v6 = isPodIPv6
-		newPodIPConfigs.elems = append(newPodIPConfigs.elems, ipConfig)
+		if selected {
+			for _, destination := range destinations {
+				if destination.CIDR.Addr().Is6() != isPodIPv6 {
+					continue
+				}
+				matched := *ipConfig
+				matched.trafficMatch = destination
+				matched.ipRule.Priority = ruleTrafficPriority
+				matched.ipRule.Dst = destination.CIDR
+				matched.ipRule.IPProto = destination.Protocol
+				matched.ipRule.Dport = netlink.RulePortRange{Start: destination.DestinationPort.Start, End: destination.DestinationPort.End}
+				matched.ipRule.Sport = netlink.RulePortRange{Start: destination.SourcePort.Start, End: destination.SourcePort.End}
+				newPodIPConfigs.elems = append(newPodIPConfigs.elems, &matched)
+			}
+		} else {
+			newPodIPConfigs.elems = append(newPodIPConfigs.elems, ipConfig)
+		}
 	}
 	return newPodIPConfigs
 }
 
 // generateEIPConfig generates configuration that isn't related to any pod EIPs to support config of a single EIP
-func generateEIPConfig(link netlink.Link, eIP net.IP, isEIPV6 bool) (*eIPConfig, error) {
+func generateEIPConfig(link netlink.Link, eIP net.IP, isEIPV6 bool, destinations []egressip.Destination, selected bool) (*eIPConfig, error) {
 	eipConfig := newEIPConfig()
 	linkRoutes, err := generateRoutesForLink(link, isEIPV6)
 	if err != nil {
 		return nil, err
+	}
+	if selected {
+		linkRoutes = replaceDefaultRouteWithDestinations(linkRoutes, destinations, isEIPV6)
 	}
 	eipConfig.routes = linkRoutes
 	eipConfig.addr = egressip.GetNetlinkAddress(eIP, link.Attrs().Index)
@@ -656,7 +738,8 @@ func (c *Controller) deleteRefObjects(name string) {
 }
 
 // updateEIP reconciles existing state towards update config. If update is nil, delete existing state.
-func (c *Controller) updateEIP(existing *state, update *config) error {
+func (c *Controller) updateEIP(eIPName string, existing *state, update *config) error {
+	var sharedRules sets.Set[iprulemanager.IPRule]
 	// cleanup first
 	// cleanup pod specific configuration - ip rules and nftables SNAT elements
 	if len(existing.namespacesWithPodIPConfigs) > 0 {
@@ -682,8 +765,11 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 					}
 				}
 				if podIPConfigsToDelete.len() > 0 {
+					if sharedRules == nil {
+						sharedRules = c.ipRulesForOtherEIPs(eIPName)
+					}
 					for _, podIPConfigToDelete := range podIPConfigsToDelete.elems {
-						if err := c.deleteIPConfig(podIPConfigToDelete); err != nil {
+						if err := c.deleteIPConfig(podIPConfigToDelete, sharedRules); err != nil {
 							existingPodConfig.insertOverwriteFailed(*podIPConfigToDelete)
 							return err
 						}
@@ -722,38 +808,20 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 			return fmt.Errorf("failed to delete egress IP address %s from annotation: %v", existing.eIPConfig.addr.String(), err)
 		}
 	}
-	// delete stale routes
-	// existing routes need to be deleted if there's no update and if there's no other active egress IP on this link.
-	if update == nil && existing.eIPConfig != nil && len(existing.eIPConfig.routes) > 0 && existing.eIPConfig.addr != nil {
-		// Egress IP for this config and link should already be deleted in steps previously.
-		// If there is different Egress IP active on this link, we do not want to delete the routes needed for that other egress IP.
-		ipFamily := util.GetIPFamily(utilnet.IsIPv6(existing.eIPConfig.addr.IP))
-		assignedAddresses, err := c.getAnnotation()
-		if err != nil {
-			return fmt.Errorf("failed to get assigned addresses: %v", err)
+	// Routes are shared by all EgressIPs on an interface.
+	if existing.eIPConfig != nil {
+		var updatedRoutes []netlink.Route
+		if update != nil && update.eIPConfig != nil {
+			updatedRoutes = update.eIPConfig.routes
 		}
-		isEIPOnLink, err := isEgressIPOnLink(existing.eIPConfig.addr.LinkIndex, ipFamily, assignedAddresses)
-		if err != nil {
-			return fmt.Errorf("failed to determine if link with index %d hosts an existing Egress IP: %v",
-				existing.eIPConfig.addr.LinkIndex, err)
-		}
-		if !isEIPOnLink {
-			for _, routeToDelete := range existing.eIPConfig.routes {
-				err = c.routeManager.Del(routeToDelete)
-				if err != nil {
-					return fmt.Errorf("failed to delete egress IP route: %w", err)
+		peers := c.routesForOtherEIPs(eIPName)
+		for _, route := range routeDifference(existing.eIPConfig.routes, updatedRoutes) {
+			if !containsRoute(peers, route) {
+				if err := c.routeManager.Del(route); err != nil {
+					return err
 				}
 			}
-		}
-	} else if update != nil && update.eIPConfig != nil && len(update.eIPConfig.routes) > 0 &&
-		existing.eIPConfig != nil && len(existing.eIPConfig.routes) > 0 {
-		// delete delta between existing and update
-		routesToDelete := routeDifference(existing.eIPConfig.routes, update.eIPConfig.routes)
-		for _, routeToDelete := range routesToDelete {
-			err := c.routeManager.Del(routeToDelete)
-			if err != nil {
-				return fmt.Errorf("failed to delete egress IP route: %w", err)
-			}
+			existing.eIPConfig.routes = routeDifference(existing.eIPConfig.routes, []netlink.Route{route})
 		}
 	}
 	// apply new changes
@@ -786,10 +854,13 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 			return fmt.Errorf("failed to add address to link: %v", err)
 		}
 		existing.eIPConfig.addr = update.eIPConfig.addr
-		// route manager manages retry
+		// Record each applied route so retries and deletion can clean up partial moves.
 		for _, routeToAdd := range update.eIPConfig.routes {
 			if err := c.routeManager.Add(routeToAdd); err != nil {
 				return err
+			}
+			if !containsRoute(existing.eIPConfig.routes, routeToAdd) {
+				existing.eIPConfig.routes = append(existing.eIPConfig.routes, routeToAdd)
 			}
 		}
 		existing.eIPConfig.routes = update.eIPConfig.routes
@@ -797,9 +868,14 @@ func (c *Controller) updateEIP(existing *state, update *config) error {
 	return nil
 }
 
-func (c *Controller) deleteIPConfig(podIPConfigToDelete *podIPConfig) error {
-	if err := c.ruleManager.Delete(podIPConfigToDelete.ipRule); err != nil {
-		return err
+func (c *Controller) deleteIPConfig(podIPConfigToDelete *podIPConfig, sharedRules sets.Set[iprulemanager.IPRule]) error {
+	if !sharedRules.Has(podIPConfigToDelete.ipRule) {
+		if err := c.ruleManager.Delete(podIPConfigToDelete.ipRule); err != nil {
+			return err
+		}
+	}
+	if podIPConfigToDelete.trafficMatch.CIDR.IsValid() {
+		return nil
 	}
 	mapName := types.EgressIPNFTablesMapV4
 	if podIPConfigToDelete.v6 {
@@ -829,6 +905,10 @@ func (c *Controller) applyPodConfig(existingPodIPsConfig *podIPConfigList, updat
 		if err := c.ruleManager.Add(newPodIPConfig.ipRule); err != nil {
 			existingPodIPsConfig.insertOverwriteFailed(*newPodIPConfig)
 			return err
+		}
+		if newPodIPConfig.trafficMatch.CIDR.IsValid() {
+			existingPodIPsConfig.insertOverwrite(*newPodIPConfig)
+			continue
 		}
 		mapName := types.EgressIPNFTablesMapV4
 		if newPodIPConfig.v6 {
@@ -911,17 +991,20 @@ func (c *Controller) repairNode() error {
 			assignedIPRouteStrToRoutes[routeStr] = existingRoute
 		}
 	}
-	filter, mask := filterRuleByPriority(rulePriority)
-	existingRules, err := util.GetNetLinkOps().RuleListFiltered(netlink.FAMILY_ALL, filter, mask)
-	if err != nil {
-		return fmt.Errorf("failed to list IP rules: %v", err)
+	for _, priority := range []int{ruleTrafficPriority, rulePriority} {
+		filter, mask := filterRuleByPriority(priority)
+		existingRules, err := util.GetNetLinkOps().RuleListFiltered(netlink.FAMILY_ALL, filter, mask)
+		if err != nil {
+			return fmt.Errorf("failed to list IP rules: %v", err)
+		}
+		for _, existingRule := range existingRules {
+			ipRule := iprulemanager.IPRuleFromNetlinkRule(&existingRule)
+			ruleStr := ipRule.String()
+			assignedIPRules.Insert(ruleStr)
+			assignedIPRulesStrToRules[ruleStr] = ipRule
+		}
 	}
-	for _, existingRule := range existingRules {
-		ipRule := iprulemanager.IPRuleFromNetlinkRule(&existingRule)
-		ruleStr := ipRule.String()
-		assignedIPRules.Insert(ruleStr)
-		assignedIPRulesStrToRules[ruleStr] = ipRule
-	}
+	var expectedTraffic []*podIPConfig
 	expectedAddrs := sets.New[addrLink]()
 	expectedIPRoutes := sets.New[string]()
 	expectedIPRules := sets.New[string]()
@@ -940,6 +1023,13 @@ func (c *Controller) repairNode() error {
 		return fmt.Errorf("failed to get node egress IP config: %v", err)
 	}
 	for _, egressIP := range egressIPs {
+		destinations, selected, err := c.destinationMatches(egressIP)
+		if err != nil {
+			return err
+		}
+		if selected && len(destinations) == 0 {
+			continue
+		}
 		if len(egressIP.Status.Items) == 0 {
 			continue
 		}
@@ -970,6 +1060,9 @@ func (c *Controller) repairNode() error {
 			if err != nil {
 				return fmt.Errorf("failed to generate IP routes for link %s for EgressIP %s IP %s: %v", linkName,
 					egressIP.Name, eIPNet.IP.String(), err)
+			}
+			if selected {
+				linkRoutes = replaceDefaultRouteWithDestinations(linkRoutes, destinations, isEIPV6)
 			}
 			for _, route := range linkRoutes {
 				expectedIPRoutes.Insert(route.String())
@@ -1024,12 +1117,17 @@ func (c *Controller) repairNode() error {
 							if !c.isIPSupported(isPodIPV6) {
 								continue
 							}
-							if isPodIPV6 {
-								expectedV6Elems[podIP.String()] = snatElem{egressIP: status.EgressIP, ifName: linkName}
-							} else {
-								expectedV4Elems[podIP.String()] = snatElem{egressIP: status.EgressIP, ifName: linkName}
+							configs := generatePodConfig([]net.IP{podIP}, link, eIPNet.IP, isEIPV6, destinations, selected)
+							for _, config := range configs.elems {
+								expectedIPRules.Insert(config.ipRule.String())
+								if config.trafficMatch.CIDR.IsValid() {
+									expectedTraffic = append(expectedTraffic, config)
+								} else if isPodIPV6 {
+									expectedV6Elems[podIP.String()] = snatElem{egressIP: status.EgressIP, ifName: linkName}
+								} else {
+									expectedV4Elems[podIP.String()] = snatElem{egressIP: status.EgressIP, ifName: linkName}
+								}
 							}
-							expectedIPRules.Insert(generateIPRule(podIP, isPodIPV6, link.Attrs().Index).String())
 						}
 					}
 				}
@@ -1084,7 +1182,7 @@ func (c *Controller) repairNode() error {
 		return fmt.Errorf("failed to sync expected SNAT map elements (%d v4, %d v6): %v",
 			len(expectedV4Elems), len(expectedV6Elems), err)
 	}
-	return nil
+	return c.syncSelectiveSNATRules(expectedTraffic)
 }
 
 // migrateFromAddrLabelToAnnotation gathers currently assigned EIP addresses and adds this info to a node annotation which

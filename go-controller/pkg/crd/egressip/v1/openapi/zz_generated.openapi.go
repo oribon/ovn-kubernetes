@@ -231,6 +231,12 @@ func schema_pkg_crd_egressip_v1_EgressIPSpec(ref common.ReferenceCallback) commo
 				Description: "EgressIPSpec is a desired state description of EgressIP.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"trafficSelector": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TrafficSelector selects EgressTrafficClasses whose destinations use this EgressIP. When omitted, this EgressIP applies to all egress traffic. Expression operators and value counts must form a valid Kubernetes label selector.",
+							Ref:         ref(metav1.LabelSelector{}.OpenAPIModelName()),
+						},
+					},
 					"egressIPs": {
 						VendorExtensible: spec.VendorExtensible{
 							Extensions: spec.Extensions{
@@ -285,6 +291,29 @@ func schema_pkg_crd_egressip_v1_EgressIPStatus(ref common.ReferenceCallback) com
 			SchemaProps: spec.SchemaProps{
 				Type: []string{"object"},
 				Properties: map[string]spec.Schema{
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type":       "map",
+								"x-kubernetes-patch-merge-key": "type",
+								"x-kubernetes-patch-strategy":  "merge",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions describe traffic selector resolution and conflicts.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(metav1.Condition{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
 					"items": {
 						VendorExtensible: spec.VendorExtensible{
 							Extensions: spec.Extensions{
@@ -308,7 +337,7 @@ func schema_pkg_crd_egressip_v1_EgressIPStatus(ref common.ReferenceCallback) com
 			},
 		},
 		Dependencies: []string{
-			v1.EgressIPStatusItem{}.OpenAPIModelName()},
+			v1.EgressIPStatusItem{}.OpenAPIModelName(), metav1.Condition{}.OpenAPIModelName()},
 	}
 }
 

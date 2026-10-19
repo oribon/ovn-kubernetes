@@ -31,6 +31,9 @@ type Interface interface {
 
 // This struct should be updated whenever a new netlink.Rule field is used in the codebase.
 type IPRule struct {
+	IPProto  int
+	Dport    netlink.RulePortRange
+	Sport    netlink.RulePortRange
 	Priority int
 	Table    int
 	Family   int
@@ -61,6 +64,15 @@ func (r IPRule) String() string {
 	if r.Dst.IsValid() {
 		s += fmt.Sprintf(" dst:%s", r.Dst)
 	}
+	if r.IPProto != 0 {
+		s += fmt.Sprintf(" ipproto:%d", r.IPProto)
+	}
+	if r.Dport != (netlink.RulePortRange{}) {
+		s += fmt.Sprintf(" dport:%d-%d", r.Dport.Start, r.Dport.End)
+	}
+	if r.Sport != (netlink.RulePortRange{}) {
+		s += fmt.Sprintf(" sport:%d-%d", r.Sport.Start, r.Sport.End)
+	}
 	return s
 }
 
@@ -68,14 +80,22 @@ func (r IPRule) String() string {
 // This function does not copy a netlink rule one-to-one.
 // If additional fields are needed, they must be added to IPRule.
 func IPRuleFromNetlinkRule(r *netlink.Rule) IPRule {
-	return IPRule{
+	rule := IPRule{
 		Priority: r.Priority,
+		IPProto:  r.IPProto,
 		Table:    r.Table,
 		Family:   r.Family,
 		Mark:     r.Mark,
 		Src:      ipNetToPrefix(r.Src),
 		Dst:      ipNetToPrefix(r.Dst),
 	}
+	if r.Dport != nil {
+		rule.Dport = *r.Dport
+	}
+	if r.Sport != nil {
+		rule.Sport = *r.Sport
+	}
+	return rule
 }
 
 func (r IPRule) toNetlinkRule() *netlink.Rule {
@@ -84,6 +104,15 @@ func (r IPRule) toNetlinkRule() *netlink.Rule {
 	nl.Table = r.Table
 	nl.Family = r.Family
 	nl.Mark = r.Mark
+	nl.IPProto = r.IPProto
+	if r.Dport != (netlink.RulePortRange{}) {
+		port := r.Dport
+		nl.Dport = &port
+	}
+	if r.Sport != (netlink.RulePortRange{}) {
+		port := r.Sport
+		nl.Sport = &port
+	}
 	nl.Src = prefixToIPNet(r.Src)
 	nl.Dst = prefixToIPNet(r.Dst)
 	return nl

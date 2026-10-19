@@ -5,9 +5,15 @@
 
 package v1
 
+import (
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
+)
+
 // EgressIPStatusApplyConfiguration represents a declarative configuration of the EgressIPStatus type for use
 // with apply.
 type EgressIPStatusApplyConfiguration struct {
+	// Conditions describe traffic selector resolution and conflicts.
+	Conditions []metav1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// The list of assigned egress IPs and their corresponding node assignment.
 	Items []EgressIPStatusItemApplyConfiguration `json:"items,omitempty"`
 }
@@ -16,6 +22,19 @@ type EgressIPStatusApplyConfiguration struct {
 // apply.
 func EgressIPStatus() *EgressIPStatusApplyConfiguration {
 	return &EgressIPStatusApplyConfiguration{}
+}
+
+// WithConditions adds the given value to the Conditions field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Conditions field.
+func (b *EgressIPStatusApplyConfiguration) WithConditions(values ...*metav1.ConditionApplyConfiguration) *EgressIPStatusApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithConditions")
+		}
+		b.Conditions = append(b.Conditions, *values[i])
+	}
+	return b
 }
 
 // WithItems adds the given value to the Items field in the declarative configuration

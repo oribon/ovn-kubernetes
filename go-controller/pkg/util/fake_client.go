@@ -36,6 +36,8 @@ import (
 	egressqosfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned/fake"
 	egressservice "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
 	egressservicefake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/fake"
+	egresstrafficclass "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egresstrafficclass/v1"
+	egresstrafficclassfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egresstrafficclass/v1/apis/clientset/versioned/fake"
 	networkqos "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1"
 	networkqosfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned/fake"
 	routeadvertisements "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1"
@@ -50,6 +52,7 @@ import (
 
 func GetOVNClientset(objects ...runtime.Object) *OVNClientset {
 	egressIPObjects := []runtime.Object{}
+	egressTrafficClassObjects := []runtime.Object{}
 	egressFirewallObjects := []runtime.Object{}
 	egressQoSObjects := []runtime.Object{}
 	multiNetworkPolicyObjects := []runtime.Object{}
@@ -71,6 +74,8 @@ func GetOVNClientset(objects ...runtime.Object) *OVNClientset {
 		switch object.(type) {
 		case *egressip.EgressIP:
 			egressIPObjects = append(egressIPObjects, object)
+		case *egresstrafficclass.EgressTrafficClass:
+			egressTrafficClassObjects = append(egressTrafficClassObjects, object)
 		case *egressfirewall.EgressFirewall:
 			egressFirewallObjects = append(egressFirewallObjects, object)
 		case *egressqos.EgressQoS:
@@ -119,6 +124,7 @@ func GetOVNClientset(objects ...runtime.Object) *OVNClientset {
 		KubeClient:                fake.NewSimpleClientset(v1Objects...),
 		ANPClient:                 anpfake.NewSimpleClientset(anpObjects...),
 		EgressIPClient:            egressipfake.NewSimpleClientset(egressIPObjects...),
+		EgressTrafficClassClient:  egresstrafficclassfake.NewSimpleClientset(egressTrafficClassObjects...),
 		EgressFirewallClient:      egressfirewallfake.NewClientset(egressFirewallObjects...),
 		CloudNetworkClient:        cloudservicefake.NewSimpleClientset(cloudObjects...),
 		EgressQoSClient:           egressqosfake.NewSimpleClientset(egressQoSObjects...),

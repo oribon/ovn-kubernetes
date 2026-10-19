@@ -34,6 +34,13 @@ type EgressIP struct {
 }
 
 type EgressIPStatus struct {
+	// Conditions describe traffic selector resolution and conflicts.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 	// The list of assigned egress IPs and their corresponding node assignment.
 	// +listType=atomic
 	Items []EgressIPStatusItem `json:"items"`
@@ -49,6 +56,13 @@ type EgressIPStatusItem struct {
 
 // EgressIPSpec is a desired state description of EgressIP.
 type EgressIPSpec struct {
+	// TrafficSelector selects EgressTrafficClasses whose destinations use this EgressIP.
+	// When omitted, this EgressIP applies to all egress traffic.
+	// Expression operators and value counts must form a valid Kubernetes label selector.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="trafficSelector must specify matchLabels or matchExpressions"
+	// +kubebuilder:validation:XValidation:rule="!has(self.matchExpressions) || self.matchExpressions.all(e, e.operator in ['In', 'NotIn', 'Exists', 'DoesNotExist'] && (e.operator in ['In', 'NotIn'] ? has(e.values) && size(e.values) > 0 : !has(e.values) || size(e.values) == 0))",message="trafficSelector operators must be In or NotIn with values, or Exists or DoesNotExist without values"
+	TrafficSelector *metav1.LabelSelector `json:"trafficSelector,omitempty"`
 	// EgressIPs is the list of egress IP addresses requested. Can be IPv4 and/or IPv6.
 	// This field is mandatory.
 	// +listType=atomic

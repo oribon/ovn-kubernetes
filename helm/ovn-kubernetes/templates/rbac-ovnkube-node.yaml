@@ -175,6 +175,7 @@ rules:
     - apiGroups: ["k8s.ovn.org"]
       resources:
           - egressfirewalls
+          - egresstrafficclasses
           - egressips
           - egressqoses
           - egressservices

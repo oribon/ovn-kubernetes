@@ -25,6 +25,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `trafficSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#labelselector-v1-meta)_ | TrafficSelector selects EgressTrafficClasses whose destinations use this EgressIP.<br />When omitted, this EgressIP applies to all egress traffic.<br />Expression operators and value counts must form a valid Kubernetes label selector. |  | Optional: \{\} <br /> |
 | `egressIPs` _string array_ | EgressIPs is the list of egress IP addresses requested. Can be IPv4 and/or IPv6.<br />This field is mandatory. |  |  |
 | `namespaceSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#labelselector-v1-meta)_ | NamespaceSelector applies the egress IP only to the namespace(s) whose label<br />matches this definition. This field is mandatory. |  |  |
 | `podSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#labelselector-v1-meta)_ | PodSelector applies the egress IP only to the pods whose label<br />matches this definition. This field is optional, and in case it is not set:<br />results in the egress IP being applied to all pods in the namespace(s)<br />matched by the NamespaceSelector. In case it is set: is intersected with<br />the NamespaceSelector, thus applying the egress IP to the pods<br />(in the namespace(s) already matched by the NamespaceSelector) which<br />match this pod selector. |  | Optional: \{\} <br /> |
@@ -44,6 +45,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions describe traffic selector resolution and conflicts. |  | Optional: \{\} <br /> |
 | `items` _[EgressIPStatusItem](#egressipstatusitem) array_ | The list of assigned egress IPs and their corresponding node assignment. |  |  |
 
 

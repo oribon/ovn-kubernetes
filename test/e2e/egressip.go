@@ -18,21 +18,12 @@ import (
 	"sync"
 	"time"
 
+	nadclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/ginkgo/v2/dsl/table"
 	"github.com/onsi/gomega"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
-	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/allocators"
-	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
-	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
-	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
-	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
-	infraapi "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider/api"
-
-	nadclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -43,6 +34,18 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
 	utilnet "k8s.io/utils/net"
+
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/allocators"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
+	infraapi "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider/api"
+
+	eipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	trafficv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egresstrafficclass/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -508,6 +511,7 @@ var _ = ginkgo.Describe("e2e egress IP validation", feature.EgressIP, func() {
 			pod2Name                                     = "e2e-egressip-pod-2"
 			usedEgressNodeAvailabilityHandler            egressNodeAvailabilityHandler
 			isIPv6TestRun                                bool
+			pod1EgressIP                                 string
 		)
 
 		targetPodAndTest := func(namespace, fromName, toName, toIP string, toPort uint16) wait.ConditionFunc {
@@ -896,9 +900,48 @@ var _ = ginkgo.Describe("e2e egress IP validation", feature.EgressIP, func() {
 				waitForNoTaint(node.Name, "node.kubernetes.io/unreachable")
 				waitForNoTaint(node.Name, "node.kubernetes.io/not-ready")
 			}
-			// Primary provider network
+			primaryIP := func(node *corev1.Node) net.IP {
+				addresses, err := util.ParseNodePrimaryIfAddr(node)
+				framework.ExpectNoError(err)
+				ip := addresses.V4.IP
+				if isIPv6TestRun {
+					ip = addresses.V6.IP
+				}
+				gomega.Expect(ip).NotTo(gomega.BeNil())
+				return ip
+			}
+			pod1EgressIP = primaryIP(&nodes.Items[0]).String()
+			egressPrimaryIP := primaryIP(&nodes.Items[1])
 			primaryProviderNetwork, err := infraprovider.Get().PrimaryNetwork()
 			framework.ExpectNoError(err, "failed to get primary provider network")
+			containsEgressIP := func(network infraapi.Network) bool {
+				v4, v6, err := network.IPv4IPv6Subnets()
+				framework.ExpectNoError(err)
+				subnet := v4
+				if isIPv6TestRun {
+					subnet = v6
+				}
+				if subnet == "" {
+					return false
+				}
+				_, cidr, err := net.ParseCIDR(subnet)
+				framework.ExpectNoError(err)
+				return cidr.Contains(egressPrimaryIP)
+			}
+			// Keep external probes on OVN's egress network to avoid additional runtime SNAT.
+			if !containsEgressIP(primaryProviderNetwork) {
+				names, err := infraprovider.Get().ListNetworks()
+				framework.ExpectNoError(err)
+				for _, name := range names {
+					candidate, err := infraprovider.Get().GetNetwork(name)
+					framework.ExpectNoError(err)
+					if containsEgressIP(candidate) {
+						primaryProviderNetwork = candidate
+						break
+					}
+				}
+				gomega.Expect(containsEgressIP(primaryProviderNetwork)).To(gomega.BeTrue(), "no provider network contains OVN primary IP %s", egressPrimaryIP)
+			}
 
 			// attach containers to the primary network
 			primaryTargetExternalContainerPort := infraprovider.Get().GetExternalContainerPort()
@@ -1257,6 +1300,340 @@ spec:
 		   19. Check connectivity from second pod to another node (egress2Node) primary IP and verify that the srcIP is the expected nodeIP (this verifies SNAT's towards nodeIP are not deleted for pods unless pod is on its own egressNode)
 		   20. Check connectivity from second pod to another node (egress2Node) secondary IP and verify that the srcIP is the expected nodeIP (this verifies SNAT's towards nodeIP are not deleted for pods unless pod is on its own egressNode)
 		*/
+		const sourcePortStart, sourcePortEnd = 20000, 20100
+		type trafficFilter int
+		const (
+			cidrFilter trafficFilter = iota
+			tcpPortFilter
+			tcpExcludedPortFilter
+			tcpRangeFilter
+			udpSourceRangeFilter
+		)
+		type trafficAction int
+		const (
+			checkTraffic trafficAction = iota
+			deleteClass
+			multipleInterfaces
+			sharedInterface
+			catchAllOwner
+			updateDestination
+			updateLabels
+			addSelector
+			mixedDestinations
+			restartOwners
+			failoverOwners
+		)
+		for _, secondary := range []bool{false, true} {
+			for _, scenario := range []struct {
+				name   string
+				filter trafficFilter
+				action trafficAction
+			}{
+				{"matching and nonmatching destinations and class deletion", cidrFilter, deleteClass},
+				{"multiple selective owners", cidrFilter, multipleInterfaces},
+				{"two owners on one interface", cidrFilter, sharedInterface},
+				{"catch-all coexistence", cidrFilter, catchAllOwner},
+				{"destination update", cidrFilter, updateDestination},
+				{"label update", cidrFilter, updateLabels},
+				{"selector addition", cidrFilter, addSelector},
+				{"matching port", tcpPortFilter, checkTraffic},
+				{"nonmatching port", tcpExcludedPortFilter, checkTraffic},
+				{"mixed destinations", tcpPortFilter, mixedDestinations},
+				{"destination port range boundaries and exclusions", tcpRangeFilter, checkTraffic},
+				{"UDP source port range boundaries and exclusions", udpSourceRangeFilter, checkTraffic},
+				{"multi-owner restart", cidrFilter, restartOwners},
+				{"multi-owner failover", cidrFilter, failoverOwners},
+			} {
+				hosting := "OVN network"
+				if secondary {
+					hosting = "secondary-host-eip"
+				}
+				ginkgo.It(fmt.Sprintf("[%s] [traffic-selector] %s", hosting, scenario.name), func() {
+					ovnNamespace := deploymentconfig.Get().OVNKubernetesNamespace()
+					if getTemplateContainerEnv(ovnNamespace, "daemonset/ovnkube-node", getNodeContainerName(), "OVN_EGRESS_TRAFFIC_CLASS_ENABLE") != "true" {
+						ginkgo.Skip("EgressTrafficClass is disabled")
+					}
+					if secondary && isUserDefinedNetwork(netConfigParams) {
+						ginkgo.Skip("Secondary-host EgressIPs on UDNs are unsupported")
+					}
+					availability := egressNodeAvailabilityHandlerViaLabel{f}
+					availability.Enable(egress1Node.name)
+					nsLabels := map[string]string{"name": f.Namespace.Name}
+					updateNamespaceLabels(f, f.Namespace, nsLabels)
+					allocatePrimary := func() string {
+						var ip net.IP
+						var err error
+						if isIPv6TestRun {
+							ip, err = allocators.NewPrimaryIPv6(egress1Node.name)
+						} else {
+							ip, err = allocators.NewPrimaryIPv4(egress1Node.name)
+						}
+						framework.ExpectNoError(err)
+						return ip.String()
+					}
+					selectedIP := allocatePrimary()
+					target := primaryTargetExternalContainer
+					if secondary {
+						target = secondaryTargetExternalContainer
+						selectedIP = "10.10.10.100"
+						if isIPv6TestRun {
+							selectedIP = "2001:db8:abcd:1234:c001::"
+						}
+					}
+					selectedIP = net.ParseIP(selectedIP).String()
+					if scenario.filter == udpSourceRangeFilter {
+						port := infraprovider.Get().GetExternalContainerPort()
+						var err error
+						target, err = providerCtx.CreateExternalContainer(infraapi.ExternalContainer{Name: "traffic-udp", Image: images.AgnHost(), Network: target.Network,
+							CmdArgs: []string{"netexec", fmt.Sprintf("--http-port=%d", port), fmt.Sprintf("--udp-port=%d", port)}, ExtPort: port})
+						framework.ExpectNoError(err)
+					}
+					peerNetwork := target.Network
+					if secondary && scenario.action == multipleInterfaces {
+						peerSubnet := "10.20.20.0/24"
+						if isIPv6TestRun {
+							peerSubnet = "2001:db8:abcd:5678::/64"
+						}
+						var err error
+						peerNetwork, err = providerCtx.CreateNetwork("traffic-peer", peerSubnet)
+						framework.ExpectNoError(err)
+						for _, node := range []string{egress1Node.name, egress2Node.name} {
+							_, err = providerCtx.AttachNetwork(peerNetwork, node)
+							framework.ExpectNoError(err)
+						}
+						firstInterface, err := infraprovider.Get().GetK8NodeNetworkInterface(egress1Node.name, target.Network)
+						framework.ExpectNoError(err)
+						secondInterface, err := infraprovider.Get().GetK8NodeNetworkInterface(egress1Node.name, peerNetwork)
+						framework.ExpectNoError(err)
+						gomega.Expect(firstInterface.GetName()).NotTo(gomega.Equal(secondInterface.GetName()))
+					}
+					otherPort := infraprovider.Get().GetExternalContainerPort()
+					other, err := providerCtx.CreateExternalContainer(infraapi.ExternalContainer{Name: "traffic-other", Image: images.AgnHost(), Network: peerNetwork, CmdArgs: getAgnHostHTTPPortBindCMDArgs(otherPort), ExtPort: otherPort})
+					framework.ExpectNoError(err)
+					targetIP := func(container infraapi.ExternalContainer) string {
+						if isIPv6TestRun {
+							return container.GetIPv6()
+						}
+						return container.GetIPv4()
+					}
+					prefix := func(container infraapi.ExternalContainer) string {
+						bits := 32
+						if isIPv6TestRun {
+							bits = 128
+						}
+						return fmt.Sprintf("%s/%d", targetIP(container), bits)
+					}
+					apply := func(resource interface{}, kind, name string) {
+						data, err := json.Marshal(resource)
+						framework.ExpectNoError(err)
+						cleanup, err := applyManifest("default", string(data))
+						framework.ExpectNoError(err)
+						ginkgo.DeferCleanup(cleanup)
+						ginkgo.DeferCleanup(func() { e2ekubectl.RunKubectlOrDie("default", "delete", kind, name, "--ignore-not-found=true") })
+					}
+					class := &trafficv1.EgressTrafficClass{TypeMeta: metav1.TypeMeta{APIVersion: "k8s.ovn.org/v1", Kind: "EgressTrafficClass"}, ObjectMeta: metav1.ObjectMeta{Name: "traffic-" + f.Namespace.Name, Labels: map[string]string{"traffic": f.Namespace.Name}}, Spec: trafficv1.EgressTrafficClassSpec{Destinations: []trafficv1.Destination{{CIDR: prefix(target)}}}}
+					port := int32(target.GetPort())
+					if scenario.filter != cidrFilter {
+						protocol := &trafficv1.PortProtocol{DestinationPort: &trafficv1.Port{Number: &port}}
+						switch scenario.filter {
+						case tcpExcludedPortFilter:
+							wrong := port + 1
+							protocol.DestinationPort.Number = &wrong
+						case tcpRangeFilter:
+							protocol.DestinationPort = &trafficv1.Port{Range: &trafficv1.PortRange{Start: port - 1, End: port + 1}}
+						case udpSourceRangeFilter:
+							protocol.DestinationPort = nil
+							protocol.SourcePort = &trafficv1.Port{Range: &trafficv1.PortRange{Start: sourcePortStart, End: sourcePortEnd}}
+						}
+						class.Spec.Destinations[0].Protocols = []trafficv1.ProtocolMatch{{TCP: protocol}}
+						if scenario.filter == udpSourceRangeFilter {
+							class.Spec.Destinations[0].Protocols = []trafficv1.ProtocolMatch{{UDP: protocol}}
+						}
+					}
+					if scenario.action == mixedDestinations {
+						class.Spec.Destinations = append(class.Spec.Destinations, trafficv1.Destination{CIDR: prefix(other)})
+					}
+					apply(class, "egresstrafficclass", class.Name)
+					selector := &metav1.LabelSelector{MatchLabels: class.Labels}
+					eip := &eipv1.EgressIP{TypeMeta: metav1.TypeMeta{APIVersion: "k8s.ovn.org/v1", Kind: "EgressIP"}, ObjectMeta: metav1.ObjectMeta{Name: egressIPName}, Spec: eipv1.EgressIPSpec{EgressIPs: []string{selectedIP}, NamespaceSelector: metav1.LabelSelector{MatchLabels: nsLabels}, PodSelector: metav1.LabelSelector{MatchLabels: podEgressLabel}, TrafficSelector: selector}, Status: eipv1.EgressIPStatus{Items: []eipv1.EgressIPStatusItem{}}}
+					if scenario.action == addSelector {
+						eip.Spec.TrafficSelector = nil
+					}
+					apply(eip, "egressip", eip.Name)
+					verifySpecificEgressIPStatusLengthEquals(eip.Name, 1, nil)
+					_, err = createGenericPodWithLabel(f, pod1Name, pod1Node.name, f.Namespace.Name, getAgnHostHTTPPortBindFullCMD(clusterNetworkHTTPPort), podEgressLabel)
+					framework.ExpectNoError(err)
+					probe := func(container infraapi.ExternalContainer, expected string, sourcePorts ...int) {
+						ginkgo.GinkgoHelper()
+						attempt := 0
+						gomega.Eventually(func() error {
+							command := fmt.Sprintf("curl --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 5 http://%s%s", net.JoinHostPort(targetIP(container), container.GetPortStr()), aghHostNetexecSrcIPPath)
+							udp := scenario.filter == udpSourceRangeFilter
+							if udp {
+								// Fresh tuples avoid retaining pre-convergence UDP conntrack SNAT.
+								sourcePort := sourcePortStart + 1 + attempt%(sourcePortEnd-sourcePortStart-1)
+								attempt++
+								if len(sourcePorts) > 0 {
+									sourcePort = sourcePorts[0]
+								}
+								command = fmt.Sprintf("printf 'clientip' | nc -u -w 2 -p %d %s %d", sourcePort, targetIP(container), container.GetPort())
+							}
+							// The marker distinguishes probe failure from kubectl/exec/transport failure.
+							command += "; status=$?; printf '\ntraffic-probe-exit=%s\n' \"$status\""
+							out, err := e2ekubectl.RunKubectl(f.Namespace.Name, "exec", pod1Name, "--", "sh", "-c", command)
+							if err != nil {
+								return fmt.Errorf("exec probe: %w", err)
+							}
+							payload, status, found := strings.Cut(out, "\ntraffic-probe-exit=")
+							if !found {
+								return fmt.Errorf("missing probe exit status: %q", out)
+							}
+							status = strings.TrimSpace(status)
+							if expected == "" {
+								if !udp && (status == "7" || status == "28") || udp && status == "0" && strings.TrimSpace(payload) == "" {
+									return nil
+								}
+							} else if status == "0" && containsIPInLastEntry(payload, expected) {
+								return nil
+							}
+							return fmt.Errorf("expected source %q, probe exit %s, output %q", expected, status, payload)
+						}, retryTimeout, retryInterval).Should(gomega.Succeed(), "probe %s", container.GetName())
+					}
+					patch := func(kind, name string, value interface{}) {
+						data, err := json.Marshal(value)
+						framework.ExpectNoError(err)
+						e2ekubectl.RunKubectlOrDie("default", "patch", kind, name, "--type=merge", "-p", string(data))
+					}
+					unmatched := pod1EgressIP
+					if secondary {
+						unmatched = ""
+					}
+					if scenario.action == addSelector {
+						probe(target, selectedIP)
+						probe(other, selectedIP)
+						patch("egressip", eip.Name, map[string]interface{}{"spec": map[string]interface{}{"trafficSelector": selector}})
+						probe(other, unmatched)
+					}
+					if scenario.filter == tcpExcludedPortFilter {
+						// Establish that the endpoint works before asserting exclusion.
+						class.Spec.Destinations[0].Protocols[0].TCP.DestinationPort.Number = &port
+						patch("egresstrafficclass", class.Name, map[string]interface{}{"spec": class.Spec})
+						probe(target, selectedIP)
+						wrongPort := port + 1
+						class.Spec.Destinations[0].Protocols[0].TCP.DestinationPort.Number = &wrongPort
+						patch("egresstrafficclass", class.Name, map[string]interface{}{"spec": class.Spec})
+						probe(target, unmatched)
+						return
+					}
+					probe(target, selectedIP)
+					if scenario.filter == udpSourceRangeFilter {
+						probe(target, selectedIP, sourcePortStart)
+						probe(target, selectedIP, sourcePortEnd)
+						probe(target, unmatched, sourcePortStart-1)
+						probe(target, unmatched, sourcePortEnd+1)
+					}
+					if scenario.filter == tcpRangeFilter {
+						for _, bounds := range []struct {
+							start, end int32
+							matches    bool
+						}{
+							{port, port + 1, true}, {port - 1, port, true},
+							{port + 1, port + 2, false}, {port - 2, port - 1, false},
+						} {
+							class.Spec.Destinations[0].Protocols[0].TCP.DestinationPort.Range = &trafficv1.PortRange{Start: bounds.start, End: bounds.end}
+							patch("egresstrafficclass", class.Name, map[string]interface{}{"spec": class.Spec})
+							expected := unmatched
+							if bounds.matches {
+								expected = selectedIP
+							}
+							probe(target, expected)
+						}
+					}
+					switch scenario.action {
+					case deleteClass:
+						probe(primaryDeniedExternalContainer, pod1EgressIP)
+						e2ekubectl.RunKubectlOrDie("default", "delete", "egresstrafficclass", class.Name)
+						probe(target, unmatched)
+					case updateDestination:
+						class.Spec.Destinations = []trafficv1.Destination{{CIDR: prefix(other)}}
+						patch("egresstrafficclass", class.Name, map[string]interface{}{"spec": class.Spec})
+						probe(other, selectedIP)
+						probe(target, unmatched)
+					case updateLabels:
+						patch("egresstrafficclass", class.Name, map[string]interface{}{"metadata": map[string]interface{}{"labels": map[string]string{"traffic": "unmatched"}}})
+						probe(target, unmatched)
+						patch("egresstrafficclass", class.Name, map[string]interface{}{"metadata": map[string]interface{}{"labels": class.Labels}})
+						probe(target, selectedIP)
+					case mixedDestinations:
+						probe(other, selectedIP)
+						wrongPort := port + 1
+						class.Spec.Destinations[0].Protocols[0].TCP.DestinationPort.Number = &wrongPort
+						patch("egresstrafficclass", class.Name, map[string]interface{}{"spec": class.Spec})
+						probe(target, unmatched)
+						probe(other, selectedIP)
+					case multipleInterfaces, sharedInterface, catchAllOwner, restartOwners, failoverOwners:
+						peerIP := allocatePrimary()
+						peerClass := class.DeepCopy()
+						peerClass.Name += "-peer"
+						peerClass.Labels = map[string]string{"traffic": f.Namespace.Name + "-peer"}
+						peerClass.Spec.Destinations = []trafficv1.Destination{{CIDR: prefix(other)}}
+						peer := eip.DeepCopy()
+						peer.Name = egressIPName2
+						peer.Spec.TrafficSelector = &metav1.LabelSelector{MatchLabels: peerClass.Labels}
+						if secondary && scenario.action != catchAllOwner {
+							peerIP = "10.10.10.101"
+							if isIPv6TestRun {
+								peerIP = "2001:db8:abcd:1234:c001::1"
+							}
+						}
+						if secondary && scenario.action == multipleInterfaces {
+							peerIP = "10.20.20.100"
+							if isIPv6TestRun {
+								peerIP = "2001:db8:abcd:5678:c001::"
+							}
+						}
+						peerIP = net.ParseIP(peerIP).String()
+						peer.Spec.EgressIPs = []string{peerIP}
+						if scenario.action == catchAllOwner {
+							peer.Spec.TrafficSelector = nil
+						} else {
+							apply(peerClass, "egresstrafficclass", peerClass.Name)
+						}
+						apply(peer, "egressip", peer.Name)
+						verifySpecificEgressIPStatusLengthEquals(peer.Name, 1, nil)
+						probe(target, selectedIP)
+						peerTarget := other
+						if secondary && scenario.action == catchAllOwner {
+							peerTarget = primaryDeniedExternalContainer
+						}
+						probe(peerTarget, peerIP)
+						if scenario.action == restartOwners {
+							pods, err := f.ClientSet.CoreV1().Pods(ovnNamespace).List(context.Background(), metav1.ListOptions{LabelSelector: "app=ovnkube-node", FieldSelector: "spec.nodeName=" + egress1Node.name})
+							framework.ExpectNoError(err)
+							gomega.Expect(pods.Items).NotTo(gomega.BeEmpty())
+							framework.ExpectNoError(deletePodWithWaitByName(context.Background(), f.ClientSet, pods.Items[0].Name, ovnNamespace))
+							framework.ExpectNoError(waitOVNKubernetesHealthy(f))
+							probe(target, selectedIP)
+							probe(peerTarget, peerIP)
+						}
+						if scenario.action == failoverOwners {
+							availability.Enable(egress2Node.name)
+							availability.Disable(egress1Node.name)
+							for _, name := range []string{eip.Name, peer.Name} {
+								verifySpecificEgressIPStatusLengthEquals(name, 1, func(items []egressIPStatus) bool { return items[0].Node == egress2Node.name })
+							}
+							probe(target, selectedIP)
+							probe(peerTarget, peerIP)
+						}
+						if scenario.action != catchAllOwner {
+							e2ekubectl.RunKubectlOrDie("default", "delete", "egressip", eip.Name)
+							probe(peerTarget, peerIP)
+						}
+					}
+				})
+			}
+		}
+
 		ginkgo.It("[OVN network] Should validate the egress IP SNAT functionality against host-networked pods", func() {
 			ginkgo.By("0. Add the \"k8s.ovn.org/egress-assignable\" label to egress1Node node")
 			e2enode.AddOrUpdateLabelOnNode(f.ClientSet, egress1Node.name, "k8s.ovn.org/egress-assignable", "dummy")

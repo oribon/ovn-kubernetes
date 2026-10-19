@@ -22,9 +22,6 @@ import (
 	"runtime"
 	"testing"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/rest"
@@ -32,7 +29,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	trafficv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egresstrafficclass/v1"
 	uplinkv1alpha1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/uplink/v1alpha1"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 var (
@@ -51,6 +52,7 @@ var _ = BeforeSuite(func() {
 	// Register every CRD's types the suite exercises.  Add new CRDs here.
 	scheme := k8sruntime.NewScheme()
 	utilruntime.Must(egressipv1.AddToScheme(scheme))
+	utilruntime.Must(trafficv1.AddToScheme(scheme))
 	utilruntime.Must(uplinkv1alpha1.AddToScheme(scheme))
 
 	testEnv = &envtest.Environment{

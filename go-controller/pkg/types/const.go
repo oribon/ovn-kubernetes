@@ -140,11 +140,14 @@ const (
 	HybridOverlayReroutePriority          = 501
 	DefaultNoRereoutePriority             = 102
 	EgressSVCReroutePriority              = 101
-	EgressIPReroutePriority               = 100
+	EgressIPReroutePriority               = 99
+	EgressIPTrafficReroutePriority        = 100
+	EgressIPTrafficNATPriority            = 100
 	EgressIPRerouteQoSRulePriority        = 103
 	NetworkConnectPolicyPriority          = 9001
 	// priority of logical router policies on a nodes gateway router
 	EgressIPSNATMarkPriority           = 95
+	EgressIPTrafficSNATMarkPriority    = 96
 	EgressLiveMigrationReroutePriority = 10
 
 	// EndpointSliceMirrorControllerName mirror EndpointSlice controller name (used as a value for the "endpointslice.kubernetes.io/managed-by" label)
