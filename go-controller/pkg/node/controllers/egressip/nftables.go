@@ -33,6 +33,19 @@ func (c *Controller) initNFTables() error {
 		Priority: knftables.PtrTo(knftables.SNATPriority),
 	})
 	tx.Flush(&knftables.Chain{Name: types.EgressIPNFTablesChainName})
+	// The former pre-release chain has no references after flushing the parent.
+	tx.Add(&knftables.Chain{Name: legacySelectiveSNATChain})
+	tx.Flush(&knftables.Chain{Name: legacySelectiveSNATChain})
+	tx.Delete(&knftables.Chain{Name: legacySelectiveSNATChain})
+
+	if ovnconfig.OVNKubernetesFeature.EnableTrafficClass {
+		tx.Add(&knftables.Chain{Name: selectiveSNATChain})
+		tx.Add(&knftables.Rule{Chain: types.EgressIPNFTablesChainName, Rule: "jump " + selectiveSNATChain})
+	} else {
+		tx.Add(&knftables.Chain{Name: selectiveSNATChain})
+		tx.Flush(&knftables.Chain{Name: selectiveSNATChain})
+		tx.Delete(&knftables.Chain{Name: selectiveSNATChain})
+	}
 
 	if c.v4 {
 		tx.Add(&knftables.Map{
