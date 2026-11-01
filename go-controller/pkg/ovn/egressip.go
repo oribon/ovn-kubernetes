@@ -209,6 +209,9 @@ type EgressIPController struct {
 	// trafficMatches caches compiled per-family matches by EgressIP name.
 	// Only selective owners have entries; an empty selection must match no traffic.
 	trafficMatches sync.Map
+	// trafficConditions reports cluster-wide selection independently of applied OVN state.
+	trafficConditions        controller.Reconciler
+	trafficConditionHandlers []trafficConditionHandler
 	// logicalPortCache allows access to pod IPs for all networks
 	logicalPortCache *PortCache
 	// nodeState tracks every observed node. Locality is derived from nodeName;
