@@ -290,7 +290,7 @@ var _ = ginkgo.Describe("EgressIP network registration", func() {
 				ExternalIDs: getEgressIPLRPReRouteDbIDs(eIP.Name, egressNamespace.Name, "doesnt-exist-pod",
 					IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs(),
 				Match:    "ip.src == 10.128.3.8",
-				Priority: types.EgressIPReroutePriority,
+				Priority: types.EgressIPCatchAllReroutePriority,
 				Action:   nbdb.LogicalRouterPolicyActionReroute,
 			}
 			clusterRouter := &nbdb.LogicalRouter{
@@ -309,7 +309,7 @@ var _ = ginkgo.Describe("EgressIP network registration", func() {
 			)
 
 			staleLRPPredicate := func(item *nbdb.LogicalRouterPolicy) bool {
-				return item.Priority == types.EgressIPReroutePriority &&
+				return item.Priority == types.EgressIPCatchAllReroutePriority &&
 					item.Match == "ip.src == 10.128.3.8"
 			}
 			countStaleLRPs := func() int {
@@ -328,7 +328,7 @@ var _ = ginkgo.Describe("EgressIP network registration", func() {
 				ExternalIDs: getEgressIPLRPReRouteDbIDs(eIP.Name, egressNamespace.Name, "doesnt-exist-pod",
 					IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs(),
 				Match:    "ip.src == 10.128.3.8",
-				Priority: types.EgressIPReroutePriority,
+				Priority: types.EgressIPCatchAllReroutePriority,
 				Action:   nbdb.LogicalRouterPolicyActionReroute,
 			}
 			gomega.Expect(libovsdbops.CreateOrUpdateLogicalRouterPolicyWithPredicate(
@@ -841,7 +841,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 					ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 				},
 				&nbdb.LogicalRouterPolicy{
-					Priority:    types.EgressIPReroutePriority,
+					Priority:    types.EgressIPCatchAllReroutePriority,
 					Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 					Action:      nbdb.LogicalRouterPolicyActionReroute,
 					Nexthops:    nodeLogicalRouterIPv4,
@@ -1052,7 +1052,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 					ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 				},
 				&nbdb.LogicalRouterPolicy{
-					Priority:    types.EgressIPReroutePriority,
+					Priority:    types.EgressIPCatchAllReroutePriority,
 					Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 					Action:      nbdb.LogicalRouterPolicyActionReroute,
 					Nexthops:    []string{node1MgntIP.To4().String()},
@@ -1310,7 +1310,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 							ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 						},
 						&nbdb.LogicalRouterPolicy{
-							Priority:    types.EgressIPReroutePriority,
+							Priority:    types.EgressIPCatchAllReroutePriority,
 							Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 							Action:      nbdb.LogicalRouterPolicyActionReroute,
 							Nexthops:    []string{"100.88.0.3"},
@@ -1646,7 +1646,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 					egressNodeIPsASv4, _ := buildEgressIPNodeAddressSets(egressNodeIPs)
 					expectedDatabaseState := []libovsdbtest.TestData{
 						&nbdb.LogicalRouterPolicy{
-							Priority:    types.EgressIPReroutePriority,
+							Priority:    types.EgressIPCatchAllReroutePriority,
 							Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 							Action:      nbdb.LogicalRouterPolicyActionReroute,
 							Nexthops:    []string{"100.88.0.3"},
@@ -2045,7 +2045,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 					egressNodeIPsASv4, _ := buildEgressIPNodeAddressSets(egressNodeIPs)
 					expectedDatabaseState := []libovsdbtest.TestData{
 						&nbdb.LogicalRouterPolicy{
-							Priority:    types.EgressIPReroutePriority,
+							Priority:    types.EgressIPCatchAllReroutePriority,
 							Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 							Action:      nbdb.LogicalRouterPolicyActionReroute,
 							Nexthops:    []string{"100.88.0.3"},
@@ -4608,7 +4608,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 
 				expectedDatabaseState := []libovsdbtest.TestData{
 					&nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("ip6.src == %s", egressPod.Status.PodIP),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    []string{"fd97::3"},
@@ -7333,7 +7333,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 					},
 					&nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("ip4.src == %s", egressPodIP),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    nodeLogicalRouterIPv4,
@@ -7656,7 +7656,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 					},
 				}
 				podReRoutePolicy := &nbdb.LogicalRouterPolicy{
-					Priority:    types.EgressIPReroutePriority,
+					Priority:    types.EgressIPCatchAllReroutePriority,
 					Match:       fmt.Sprintf("ip4.src == %s", oldEgressPodIP),
 					Action:      nbdb.LogicalRouterPolicyActionReroute,
 					Nexthops:    nodeLogicalRouterIPv4,
@@ -8074,7 +8074,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						},
 					}
 					podReRoutePolicy := &nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("ip4.src == %s", egressPodIP[0].String()),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    nodeLogicalRouterIPv4,
@@ -9379,7 +9379,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 					},
 					&nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    []string{"100.88.0.3"},
@@ -9515,7 +9515,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 								UUID:        "remove-me-UUID",
 								ExternalIDs: getEgressIPLRPReRouteDbIDs(eIP.Name, egressNamespace.Name, "doesnt-exist-pod", IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Match:       "ip.src == 10.128.3.8",
-								Priority:    types.EgressIPReroutePriority,
+								Priority:    types.EgressIPCatchAllReroutePriority,
 								Action:      nbdb.LogicalRouterPolicyActionReroute,
 							},
 							&nbdb.LogicalRouter{
@@ -10975,7 +10975,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 					},
 				}
 				podReRoutePolicy := &nbdb.LogicalRouterPolicy{
-					Priority:    types.EgressIPReroutePriority,
+					Priority:    types.EgressIPCatchAllReroutePriority,
 					Match:       fmt.Sprintf("ip4.src == %s", egressPodIP[0].String()),
 					Action:      nbdb.LogicalRouterPolicyActionReroute,
 					Nexthops:    nodeLogicalRouterIPv4,
@@ -11314,7 +11314,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						podEIPSNAT.LogicalIP = podV6IP
 					}
 					podReRoutePolicy := &nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("%s.src == %s", ipfamily, egressPodIP[index].String()),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    nodeLogicalRouterIPv4,
@@ -11661,7 +11661,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 					},
 					&nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    []string{node2IPv4TranSwitchIP},
@@ -12033,7 +12033,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 								},
 								// stale LRP and SNAT entries (for a host networked pod) to be removed by EIP controller sync function.
 								&nbdb.LogicalRouterPolicy{
-									Priority:    types.EgressIPReroutePriority,
+									Priority:    types.EgressIPCatchAllReroutePriority,
 									Match:       fmt.Sprintf("ip4.src == %s", node2IPv4),
 									Action:      nbdb.LogicalRouterPolicyActionReroute,
 									Nexthops:    []string{"100.64.0.2"},
@@ -12263,7 +12263,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 								ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 							},
 							&nbdb.LogicalRouterPolicy{
-								Priority:    types.EgressIPReroutePriority,
+								Priority:    types.EgressIPCatchAllReroutePriority,
 								Match:       fmt.Sprintf("ip4.src == %s", egressPod3.Status.PodIP),
 								Action:      nbdb.LogicalRouterPolicyActionReroute,
 								Nexthops:    []string{"100.64.0.2"},
@@ -12271,7 +12271,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 								UUID:        "reroute-UUID1",
 							},
 							&nbdb.LogicalRouterPolicy{
-								Priority:    types.EgressIPReroutePriority,
+								Priority:    types.EgressIPCatchAllReroutePriority,
 								Match:       fmt.Sprintf("ip4.src == %s", egressPod4.Status.PodIP),
 								Action:      nbdb.LogicalRouterPolicyActionReroute,
 								Nexthops:    []string{"100.64.0.2"},
@@ -12634,7 +12634,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 							ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 						},
 						&nbdb.LogicalRouterPolicy{
-							Priority:    types.EgressIPReroutePriority,
+							Priority:    types.EgressIPCatchAllReroutePriority,
 							Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 							Action:      nbdb.LogicalRouterPolicyActionReroute,
 							Nexthops:    []string{"100.88.0.3"},
@@ -13124,7 +13124,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 					},
 					&nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("ip4.src == %s", egressPod1.Status.PodIP),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    []string{"100.64.0.2"},
@@ -13272,7 +13272,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 					},
 					&nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("ip4.src == %s", egressPod1.Status.PodIP),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    []string{"100.64.0.2"},
@@ -13402,7 +13402,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 					},
 					&nbdb.LogicalRouterPolicy{
-						Priority:    types.EgressIPReroutePriority,
+						Priority:    types.EgressIPCatchAllReroutePriority,
 						Match:       fmt.Sprintf("ip4.src == %s", egressPod1.Status.PodIP),
 						Action:      nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops:    nodeLogicalRouterIPv4,
@@ -14260,7 +14260,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 					},
 					&nbdb.LogicalRouterPolicy{
-						Priority: types.EgressIPReroutePriority,
+						Priority: types.EgressIPCatchAllReroutePriority,
 						Match:    fmt.Sprintf("ip4.src == %s", egressPod1.Status.PodIP),
 						Action:   nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops: []string{"100.64.0.2", "100.88.0.4"},
@@ -14435,7 +14435,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 						ExternalIDs: getEgressIPLRPNoReRoutePodToJoinDbIDs(IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs(),
 					},
 					&nbdb.LogicalRouterPolicy{
-						Priority: types.EgressIPReroutePriority,
+						Priority: types.EgressIPCatchAllReroutePriority,
 						Match:    fmt.Sprintf("ip4.src == %s", egressPod1.Status.PodIP),
 						Action:   nbdb.LogicalRouterPolicyActionReroute,
 						Nexthops: []string{"100.64.0.2", "100.88.0.3"},
@@ -15386,7 +15386,7 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 				policies = append(policies, reroutePolicyUUID)
 				nats = append(nats, podNatUUID)
 				data = append(data, &nbdb.LogicalRouterPolicy{
-					Priority:    types.EgressIPReroutePriority,
+					Priority:    types.EgressIPCatchAllReroutePriority,
 					Match:       fmt.Sprintf("ip4.src == %s", egressPod.Status.PodIP),
 					Action:      nbdb.LogicalRouterPolicyActionReroute,
 					Nexthops:    []string{"100.64.0.2"},
@@ -15825,7 +15825,7 @@ func getNoReRouteReplyTrafficPolicy(network, controller string) *nbdb.LogicalRou
 
 func getReRoutePolicy(podIP, ipFamily, uuid string, nextHops []string, externalID map[string]string) *nbdb.LogicalRouterPolicy {
 	return &nbdb.LogicalRouterPolicy{
-		Priority:    types.EgressIPReroutePriority,
+		Priority:    types.EgressIPCatchAllReroutePriority,
 		Match:       fmt.Sprintf("ip%s.src == %s", ipFamily, podIP),
 		Action:      nbdb.LogicalRouterPolicyActionReroute,
 		Nexthops:    nextHops,
@@ -15836,7 +15836,7 @@ func getReRoutePolicy(podIP, ipFamily, uuid string, nextHops []string, externalI
 
 func getReRoutePolicySecondaryHost(podIP, ipFamily, uuid string, nextHops []string, externalID map[string]string) *nbdb.LogicalRouterPolicy {
 	return &nbdb.LogicalRouterPolicy{
-		Priority:    types.EgressIPReroutePriority,
+		Priority:    types.EgressIPCatchAllReroutePriority,
 		Match:       fmt.Sprintf("ip%s.src == %s", ipFamily, podIP),
 		Action:      nbdb.LogicalRouterPolicyActionReroute,
 		Nexthops:    nextHops,
