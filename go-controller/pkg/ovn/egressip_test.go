@@ -3892,7 +3892,9 @@ var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func(
 				fakeOvn.patchEgressIPObj(node1Name, egressIPName, egressIP.String())
 				gomega.Eventually(getEgressIPStatusLen(eIP.Name)).Should(gomega.Equal(1))
 
+				servedPodsV4, _ := buildEgressIPServedPodsAddressSets([]string{podV4IP}, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName)
 				expectedDatabaseState := []libovsdbtest.TestData{
+					servedPodsV4,
 					getReRoutePolicy(egressPod.Status.PodIP, "4", "reroute-UUID", nodeLogicalRouterIPv4,
 						getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV4,
 							types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
