@@ -115,6 +115,11 @@ if [ "$OVN_TRAFFIC_CLASS_ENABLE" != "true" ]; then
   skip_label "Feature:TrafficClass"
 fi
 
+# Run the extended matrix in representative lanes; keep the remaining lanes focused.
+if [ "${OVN_TRAFFIC_CLASS_EXTENDED:-false}" != "true" ]; then
+  skip_label "TrafficClassExtended"
+fi
+
 if [ "$OVN_NETWORK_QOS_ENABLE" != "true" ]; then
   skip "e2e NetworkQoS validation"
 fi
