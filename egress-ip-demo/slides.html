@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>EgressIP traffic selection</title>
+  <style>
+    :root {
+      --bg: #10151d;
+      --panel: #171f2b;
+      --line: #344152;
+      --text: #f2f5fa;
+      --muted: #a8b6c9;
+      --default: #f4cc65;
+      --a: #68d9ee;
+      --b: #efa2e5;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100dvh; display: grid; place-items: center; background: #080c12; color: var(--text); }
+    [hidden] { display: none !important; }
+    .deck { width: min(100vw, calc(100dvh * 16 / 9)); aspect-ratio: 16 / 9; position: relative; background: var(--bg); container-type: inline-size; }
+    .masthead { position: absolute; inset: 2.6cqw 5cqw auto; display: flex; justify-content: space-between; font-size: 1.1cqw; color: var(--muted); letter-spacing: .04em; }
+    .masthead strong { color: var(--text); font-weight: 650; }
+    .slide { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 1.8cqw; padding: 7cqw 5cqw 6.5cqw; }
+    h1 { margin: 0; font-size: 4.2cqw; line-height: 1.1; font-weight: 650; letter-spacing: -.045em; }
+    .lead { margin: 0; max-width: 90%; color: var(--muted); font-size: 1.9cqw; line-height: 1.5; }
+    .title-slide { justify-content: center; }
+    .title-slide h1 { font-size: 7.2cqw; line-height: 1.05; }
+    .default { color: var(--default); }
+    .a { color: var(--a); }
+    .b { color: var(--b); }
+    .note { margin: 0; padding: 1.1cqw 1.5cqw; border-left: 3px solid var(--default); background: var(--panel); font-size: 1.65cqw; line-height: 1.4; }
+    .diagram { width: 100%; flex: 1; min-height: 0; }
+    .diagram text { fill: var(--text); font-family: inherit; }
+    .diagram .muted { fill: var(--muted); }
+    .diagram .default { fill: var(--default); }
+    .diagram .a { fill: var(--a); }
+    .diagram .b { fill: var(--b); }
+    .diagram .box { fill: var(--panel); stroke: var(--line); stroke-width: 2; }
+    .diagram .wire { fill: none; stroke-width: 3; }
+    .diagram .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .legend { display: flex; gap: 2.4cqw; margin: 0; font-size: 1.4cqw; color: var(--muted); }
+    .legend span { display: flex; align-items: center; gap: .6cqw; }
+    .swatch { display: inline-block; width: .65em; height: .65em; border-radius: 50%; background: currentColor; }
+    .code-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 2cqw; flex: 1; min-height: 0; }
+    .code-card { border: 1px solid var(--line); background: var(--panel); border-radius: .8cqw; overflow: auto; }
+    .code-title { margin: 0; padding: 1cqw 1.5cqw; border-bottom: 1px solid var(--line); font-size: 1.45cqw; font-weight: 650; }
+    pre { margin: 0; padding: 1.3cqw 1.5cqw; font-size: 1.3cqw; line-height: 1.5; tab-size: 2; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .key { color: var(--muted); }
+    .match { color: var(--a); font-weight: 650; }
+    .caption { margin: 0; color: var(--muted); font-size: 1.25cqw; }
+    .steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 1.4cqw; }
+    .steps li { display: grid; grid-template-columns: 3cqw 1fr; gap: 1.3cqw; align-items: baseline; padding-bottom: 1.4cqw; border-bottom: 1px solid var(--line); }
+    .step-number { color: var(--muted); font-size: 1.5cqw; font-variant-numeric: tabular-nums; }
+    .steps h2 { margin: 0 0 .3cqw; font-size: 2cqw; font-weight: 600; }
+    .steps p { margin: 0; color: var(--muted); font-size: 1.5cqw; }
+    footer { position: absolute; inset: auto 5cqw 2cqw; display: flex; align-items: center; gap: 1.2cqw; color: var(--muted); font-size: 1cqw; }
+    #counter { margin-left: auto; min-width: 4em; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+    .progress { position: absolute; inset: auto 0 0; height: 3px; background: var(--panel); }
+    #progress-fill { height: 100%; background: var(--a); }
+    @media (max-width: 640px) {
+      body { display: block; }
+      .deck { aspect-ratio: auto; min-height: 100dvh; }
+      .masthead { position: static; padding: 22px 24px 0; font-size: 11px; }
+      .slide { position: relative; padding: 36px 24px 110px; min-height: calc(100dvh - 40px); gap: 22px; }
+      h1 { font-size: 34px; }
+      .title-slide h1 { font-size: 48px; }
+      .lead { font-size: 18px; max-width: none; }
+      .diagram { flex: none; height: auto; min-height: 190px; }
+      .note { font-size: 16px; padding: 14px; }
+      .legend { font-size: 13px; gap: 14px; flex-wrap: wrap; }
+      .code-grid { grid-template-columns: 1fr; gap: 16px; }
+      .code-title { font-size: 16px; padding: 12px 16px; }
+      pre { font-size: 13px; padding: 16px; }
+      .caption { font-size: 12px; }
+      .steps { gap: 20px; }
+      .steps li { grid-template-columns: 24px 1fr; gap: 14px; padding-bottom: 20px; }
+      .step-number { font-size: 15px; }
+      .steps h2 { font-size: 21px; }
+      .steps p { font-size: 16px; }
+      footer { inset: auto 24px 22px; gap: 12px; font-size: 12px; }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .slide:not([hidden]) { animation: appear .16s ease-out; }
+      @keyframes appear { from { opacity: 0; } to { opacity: 1; } }
+    }
+    @media print {
+      @page { size: landscape; margin: 0; }
+      body { display: block; background: var(--bg); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .deck { width: 100%; aspect-ratio: auto; }
+      .masthead, footer, .progress { display: none; }
+      .slide, .slide[hidden] { display: flex !important; position: relative; width: 100%; height: 100vh; break-after: page; padding-top: 5cqw; animation: none; }
+      .slide:last-of-type { break-after: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="deck" aria-label="EgressIP traffic selection presentation">
+    <header class="masthead"><strong>OVN-Kubernetes</strong><span>EgressIP / TrafficClass</span></header>
+
+    <section class="slide title-slide" aria-labelledby="title-cover">
+      <h1 id="title-cover">EgressIP<br>traffic selection</h1>
+      <p class="lead">Destination, protocol, and port matching</p>
+    </section>
+
+    <section class="slide" aria-labelledby="title-1" hidden>
+      <h1 id="title-1">EgressIP today</h1>
+      <p class="lead">A stable source IP for external traffic from selected pods.</p>
+      <svg class="diagram" viewBox="0 0 1120 330" role="img" aria-labelledby="diagram-1-title diagram-1-desc">
+        <title id="diagram-1-title">One EgressIP for both destinations</title>
+        <desc id="diagram-1-desc">A selected pod uses source 10.89.0.254 when reaching either backend A or backend B.</desc>
+        <defs><marker id="arrow-default-1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f4cc65"/></marker></defs>
+        <rect class="box" x="10" y="102" width="245" height="126" rx="12"/>
+        <text x="132" y="151" text-anchor="middle" font-size="27" font-weight="600">Selected pod</text>
+        <text class="muted mono" x="132" y="188" text-anchor="middle" font-size="21">client</text>
+        <path class="wire" d="M255 165 H405" stroke="#f4cc65" marker-end="url(#arrow-default-1)"/>
+        <rect class="box" x="410" y="102" width="250" height="126" rx="12"/>
+        <text x="535" y="151" text-anchor="middle" font-size="26" font-weight="600">EgressIP</text>
+        <text class="default mono" x="535" y="190" text-anchor="middle" font-size="24">10.89.0.254</text>
+        <path class="wire" d="M660 165 H738" stroke="#f4cc65"/>
+        <path class="wire" d="M738 165 V76 H830" stroke="#f4cc65" marker-end="url(#arrow-default-1)"/>
+        <path class="wire" d="M738 165 V254 H830" stroke="#f4cc65" marker-end="url(#arrow-default-1)"/>
+        <rect class="box" x="838" y="20" width="270" height="112" rx="12"/>
+        <text class="a" x="973" y="65" text-anchor="middle" font-size="25" font-weight="600">Backend A</text>
+        <text class="default mono" x="973" y="102" text-anchor="middle" font-size="21">source 10.89.0.254</text>
+        <rect class="box" x="838" y="198" width="270" height="112" rx="12"/>
+        <text class="b" x="973" y="243" text-anchor="middle" font-size="25" font-weight="600">Backend B</text>
+        <text class="default mono" x="973" y="280" text-anchor="middle" font-size="21">source 10.89.0.254</text>
+      </svg>
+      <p class="note">EgressIP selects <strong>pods</strong>, not destinations or ports.</p>
+    </section>
+
+    <section class="slide" aria-labelledby="title-2" hidden>
+      <h1 id="title-2">Destination and port selection</h1>
+      <p class="lead">TrafficClass matches a destination CIDR and optional protocol and ports. Multiple EgressIPs can serve the same pod.</p>
+      <svg class="diagram" viewBox="0 0 1120 380" role="img" aria-labelledby="diagram-2-title diagram-2-desc">
+        <title id="diagram-2-title">Traffic selection with a catch-all fallback</title>
+        <desc id="diagram-2-desc">The same pod uses selective EgressIP A for TCP port 8080 to backend A, selective EgressIP B for TCP port 8080 to backend B, and a default EgressIP for unmatched traffic.</desc>
+        <defs>
+          <marker id="arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#68d9ee"/></marker>
+          <marker id="arrow-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#efa2e5"/></marker>
+          <marker id="arrow-default-2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#f4cc65"/></marker>
+        </defs>
+        <rect class="box" x="10" y="128" width="205" height="120" rx="12"/>
+        <text x="112" y="179" text-anchor="middle" font-size="27" font-weight="600">Same pod</text>
+        <text class="muted mono" x="112" y="214" text-anchor="middle" font-size="21">client</text>
+        <path class="wire" d="M215 168 H245 V60 H470" stroke="#68d9ee" marker-end="url(#arrow-a)"/>
+        <path class="wire" d="M215 188 H470" stroke="#efa2e5" marker-end="url(#arrow-b)"/>
+        <path class="wire" d="M215 208 H245 V318 H470" stroke="#f4cc65" stroke-dasharray="7 6" marker-end="url(#arrow-default-2)"/>
+        <text class="muted" x="280" y="44" font-size="20">A · TCP/8080</text>
+        <text class="muted" x="280" y="172" font-size="20">B · TCP/8080</text>
+        <text class="muted" x="280" y="302" font-size="20">Unmatched traffic</text>
+        <rect class="box" x="480" y="15" width="260" height="90" rx="10"/>
+        <text class="muted" x="610" y="47" text-anchor="middle" font-size="19">Selective EgressIP A</text>
+        <text class="a mono" x="610" y="81" text-anchor="middle" font-size="25">10.89.0.253</text>
+        <rect class="box" x="480" y="143" width="260" height="90" rx="10"/>
+        <text class="muted" x="610" y="175" text-anchor="middle" font-size="19">Selective EgressIP B</text>
+        <text class="b mono" x="610" y="209" text-anchor="middle" font-size="25">10.89.0.252</text>
+        <rect class="box" x="480" y="273" width="260" height="90" rx="10"/>
+        <text class="muted" x="610" y="305" text-anchor="middle" font-size="19">Catch-all EgressIP</text>
+        <text class="default mono" x="610" y="339" text-anchor="middle" font-size="25">10.89.0.254</text>
+        <path class="wire" d="M740 60 H885" stroke="#68d9ee" marker-end="url(#arrow-a)"/>
+        <path class="wire" d="M740 188 H885" stroke="#efa2e5" marker-end="url(#arrow-b)"/>
+        <path class="wire" d="M740 318 H885" stroke="#f4cc65" stroke-dasharray="7 6" marker-end="url(#arrow-default-2)"/>
+        <text class="a" x="910" y="70" font-size="25" font-weight="600">Backend A</text>
+        <text class="b" x="910" y="198" font-size="25" font-weight="600">Backend B</text>
+        <text class="a" x="910" y="328" font-size="25" font-weight="600">Backend A</text>
+      </svg>
+      <p class="legend"><span><i class="swatch a" aria-hidden="true"></i>Selective A</span><span><i class="swatch b" aria-hidden="true"></i>Selective B</span><span><i class="swatch default" aria-hidden="true"></i>Unmatched traffic uses the catch-all, or normal egress.</span></p>
+    </section>
+
+    <section class="slide" aria-labelledby="title-3" hidden>
+      <h1 id="title-3">Two objects, linked by labels</h1>
+      <p class="lead">TrafficClass defines the match. EgressIP supplies the source address.</p>
+      <div class="code-grid">
+        <div class="code-card">
+          <h2 class="code-title">TrafficClass</h2>
+          <pre><code><span class="key">kind:</span> TrafficClass
+<span class="key">metadata:</span>
+  <span class="key">labels:</span>
+    <span class="match">demo.ovn.org/backend: a</span>
+<span class="key">spec:</span>
+  <span class="key">matches:</span>
+    - <span class="match">destinationCIDR: 10.89.0.8/32</span>
+      <span class="key">protocols:</span>
+        - <span class="key">tcp:</span>
+            <span class="key">destinationPort:</span>
+              <span class="match">number: 8080</span></code></pre>
+        </div>
+        <div class="code-card">
+          <h2 class="code-title">EgressIP</h2>
+          <pre><code><span class="key">kind:</span> EgressIP
+<span class="key">spec:</span>
+  <span class="match">egressIPs: [10.89.0.253]</span>
+  <span class="key">podSelector:</span>
+    <span class="key">matchLabels:</span>
+      <span class="key">app: egress-ip-demo-client</span>
+  <span class="match">trafficSelector:</span>
+    <span class="match">matchLabels:</span>
+      <span class="match">demo.ovn.org/backend: a</span></code></pre>
+        </div>
+      </div>
+      <p class="caption">TCP, UDP, and SCTP. Source and destination ports accept a single number or an inclusive range. Omit protocols to match all traffic to the CIDR.</p>
+    </section>
+
+    <section class="slide" aria-labelledby="title-4" hidden>
+      <h1 id="title-4">Live demo</h1>
+      <p class="lead">One client pod and two external agnhost containers on the KinD network.</p>
+      <ol class="steps">
+        <li><span class="step-number">01</span><div><h2>Start with a catch-all</h2><p>Both backends see the <span class="default">default source IP</span>.</p></div></li>
+        <li><span class="step-number">02</span><div><h2>Add destination selection</h2><p>Backend A sees <span class="a">A's source IP</span>; backend B sees <span class="b">B's source IP</span>.</p></div></li>
+        <li><span class="step-number">03</span><div><h2>Narrow A to TCP/8080</h2><p>HTTP keeps <span class="a">A's source IP</span>. UDP falls back to the <span class="default">default source IP</span>.</p></div></li>
+      </ol>
+    </section>
+
+    <footer>
+      <span id="counter" role="status" aria-live="polite" aria-atomic="true"></span>
+    </footer>
+    <div class="progress" aria-hidden="true"><div id="progress-fill"></div></div>
+  </main>
+  <script>
+    const slides = [...document.querySelectorAll('.slide')];
+    let current = 0;
+
+    function showSlide(index) {
+      current = Math.max(0, Math.min(slides.length - 1, index));
+      slides.forEach((slide, i) => { slide.hidden = i !== current; });
+      document.querySelector('#counter').textContent = `${current + 1} / ${slides.length}`;
+      document.querySelector('#progress-fill').style.width = `${(current + 1) / slides.length * 100}%`;
+    }
+
+    async function toggleFullscreen() {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await document.documentElement.requestFullscreen();
+      } catch (error) {
+        console.warn('Use your browser’s fullscreen command.', error);
+      }
+    }
+
+    document.addEventListener('keydown', event => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.target.closest('input, textarea, select, [contenteditable]')) return;
+      if (event.key === ' ' && event.target.closest('button, a')) return;
+      switch (event.key) {
+        case 'ArrowRight': case 'PageDown': case ' ': showSlide(current + 1); break;
+        case 'ArrowLeft': case 'PageUp': showSlide(current - 1); break;
+        case 'Home': showSlide(0); break;
+        case 'End': showSlide(slides.length - 1); break;
+        case 'f': case 'F': toggleFullscreen(); break;
+        default: return;
+      }
+      event.preventDefault();
+    });
+    showSlide(0);
+  </script>
+</body>
+</html>
